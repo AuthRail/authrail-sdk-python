@@ -1,0 +1,25 @@
+{
+  "formatVersion": 1,
+  "description": "Deterministic Go SDK tool-call proof accepted by the sidecar at 2026-10-16T12:00:00Z. Test-only zero seed.",
+  "executorSeedHex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "actionKey": "invoice-123",
+  "request": {
+    "formatVersion": 1,
+    "requestId": "00000000-0000-4000-8000-000000000009",
+    "operationVersionId": "00000000-0000-4000-8000-000000000008",
+    "phase": "tool_call",
+    "arguments": { "amount": 40 },
+    "attribution": {
+      "principalId": "staff_123",
+      "sessionId": "task_123",
+      "resourceId": null,
+      "principalSource": "application_session",
+      "resourceSource": "not_applicable"
+    },
+    "identityProof": {
+      "issuedAt": 1792152000,
+      "expiresAt": 1792152030,
+      "signature": "MVxIGZlKleogEGNoXMO--v1kTpnTl6W1PTJx2_7Gp4o0pwDzx9-MJjOO1BVMYkQx7hR7vBdn0YfM7_sZoRPmDQ"
+    }
+  }
+}
