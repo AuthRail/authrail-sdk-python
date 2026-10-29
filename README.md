@@ -457,3 +457,16 @@ This sends Python-generated proofs to the server's actual parsers and signature
 validators. It checks call, approval claim, execution receipt and Observe receipt
 formats, including rejection of changed deployment/input. It does not start a
 server, read tenant credentials or mutate a database.
+
+### Continuous integration
+
+Pull requests and pushes to main and the existing feature branch run SDK CI on
+Python 3.11–3.14. It checks lint, types, tests and distribution metadata, then
+installs both the wheel and source package in separate environments and reruns
+the tests outside the checkout. Run `python verification/check_package.py` after
+`python -m build` to check those installations locally. Use a clean `dist`
+directory containing only the two artifacts for the version being checked.
+
+The compatibility job uses real handlers from a pinned sidecar commit and
+disposable local state. It needs no customer credentials and does not establish
+tenant or provider acceptance. CI does not publish packages.

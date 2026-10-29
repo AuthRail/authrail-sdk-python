@@ -1,0 +1,61 @@
+name: SDK CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, feat/runtime-observe-adapter]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Python ${{ matrix.python }} package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install '.[dev]' 'twine>=6,<7'
+      - run: ruff check src tests verification
+      - run: mypy
+      - run: python -m unittest discover -s tests -v
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - name: Test wheel and source distribution outside checkout
+        run: python verification/check_package.py
+
+  sidecar:
+    name: Python real-sidecar compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: authrail-sdk-python
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: AuthRail/authrail-sidecar
+          ref: 1e07b16e7123f524cee73e7b1b32256bc5eb04d5
+          path: authrail-sidecar
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - run: python -m pip install ./authrail-sdk-python
+      - run: python authrail-sdk-python/verification/observe_sidecar.py
