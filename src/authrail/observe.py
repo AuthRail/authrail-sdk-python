@@ -17,6 +17,7 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from ._http import response_object
 from ._protocol import MAX_CONTEXT, MAX_VALUE, canonical, encode_input, parse_object, snapshot
 from .types import (
     AuthRailError,
@@ -146,6 +147,9 @@ class AsyncObserveClient:
             body["factResolutions"] = cast(list[JSONValue], operation.fact_resolutions)
         if operation.trajectory is not None:
             body["trajectory"] = operation.trajectory
+        if operation.review_summary is not None:
+            validate_review_summary(operation.review_summary)
+            body["reviewSummary"] = operation.review_summary
         encoded = snapshot(body)
         # Validate contextual field names before any asynchronous work or signature.
         encode_input(parse_object(encoded), "tool_call")
@@ -179,6 +183,23 @@ class AsyncObserveClient:
         # Statement and attribution are Go structs, whose field order differs from JSON maps.
         message = canonical(statement, ordered=True)[:-1]
         message += ',"attribution":' + canonical(ordered_attribution, ordered=True)
+        if phase == "tool_call" and body.get("reviewSummary") is not None:
+            summary = cast(JSONObject, body["reviewSummary"])
+            fields = cast(list[JSONObject], summary["fields"])
+            ordered_fields = (
+                "["
+                + ",".join(
+                    canonical({"label": item["label"], "value": item["value"]}, ordered=True)
+                    for item in fields
+                )
+                + "]"
+            )
+            encoded = (
+                '{"title":' + canonical(summary["title"]) + ',"fields":' + ordered_fields + "}"
+            )
+            message += ',"reviewSummarySha256":' + canonical(
+                hashlib.sha256(encoded.encode()).hexdigest()
+            )
         message += f',"issuedAt":{issued_at},"expiresAt":{issued_at + 30}' + "}"
         signature = self._private.sign(message.encode("utf-8"))
         return {
@@ -194,44 +215,37 @@ class AsyncObserveClient:
         result: object = None,
     ) -> Decision:
         """Check an Observe phase; callers must never use this as Enforce permission."""
+        return await self._evaluate(call, phase, "observe", result)
+
+    async def _evaluate(
+        self,
+        call: PreparedCall,
+        phase: Phase,
+        expected_mode: str,
+        result: object = None,
+    ) -> Decision:
         if phase not in ("tool_call", "tool_result"):
             raise AuthRailError("Invalid evaluation phase")
         body = call.as_dict()
+        if body.get("reviewSummary") is not None and expected_mode != "enforce":
+            raise AuthRailError("Review summary requires Enforce")
         body["formatVersion"] = 1
         body["phase"] = phase
         body["identityProof"] = self._proof(call, phase, result, int(time.time()))
         if phase == "tool_result":
             body["result"] = cast(JSONObject, result)
-        headers = {
-            "Authorization": "Bearer " + self._token,
-            "Idempotency-Key": call.action_key,
-            "Content-Type": "application/json",
-        }
-        if call.traceparent:
-            headers["traceparent"] = call.traceparent
-        try:
-            async with (
-                asyncio.timeout(2.0),
-                self._http.stream(
-                    "POST",
-                    self._endpoint + "/evaluate",
-                    headers=headers,
-                    content=snapshot(body),
-                ) as response,
-            ):
-                if response.status_code != 200:
-                    raise AuthRailError(f"Sidecar returned HTTP {response.status_code}")
-                data = bytearray()
-                async for chunk in response.aiter_bytes():
-                    if len(data) + len(chunk) > MAX_CONTEXT:
-                        raise AuthRailError("Sidecar response exceeds its size limit")
-                    data.extend(chunk)
-                value = parse_object(bytes(data))
-        except (httpx.HTTPError, TimeoutError):
-            raise AuthRailError("Sidecar check unavailable") from None
+            body.pop("reviewSummary", None)
+        value = await self._request_json(
+            "/evaluate",
+            body,
+            status=200,
+            deadline_seconds=4.0 if expected_mode == "enforce" else 2.0,
+            idempotency_key=call.action_key,
+            traceparent=call.traceparent,
+        )
         if (
             value.get("requestId") != call.request_id
-            or value.get("mode") != "observe"
+            or value.get("mode") != expected_mode
             or value.get("enforced") is not False
             or value.get("coverage") not in ("evaluated", "uncovered", "unavailable")
             or value.get("outcome")
@@ -262,6 +276,71 @@ class AsyncObserveClient:
             snapshot(value),
         )
 
+    def _sign_statement(self, kind: str, fields: JSONObject) -> JSONObject:
+        """Sign ordered receipt/permit fields under this application's deployment identity."""
+        now = int(time.time())
+        statement: JSONObject = {
+            "type": kind,
+            "organisationId": self._organisation_id,
+            "deploymentId": self._deployment_id,
+            **fields,
+            "issuedAt": now,
+            "expiresAt": now + 30,
+        }
+        signature = self._private.sign(canonical(statement, ordered=True).encode())
+        return {
+            "issuedAt": now,
+            "expiresAt": now + 30,
+            "signature": base64.urlsafe_b64encode(signature).rstrip(b"=").decode(),
+        }
+
+    def _key_sha256(self) -> str:
+        public = self._private.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+        return hashlib.sha256(public).hexdigest()
+
+    async def _request_json(
+        self,
+        path: str,
+        body: JSONObject | None,
+        *,
+        status: int,
+        deadline_seconds: float,
+        idempotency_key: str | None = None,
+        traceparent: str | None = None,
+        method: str = "POST",
+    ) -> JSONObject:
+        headers = {"Authorization": "Bearer " + self._token, "Content-Type": "application/json"}
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
+        if traceparent:
+            match = _TRACE.fullmatch(traceparent)
+            if not match or match[1] == "0" * 32 or match[2] == "0" * 16:
+                raise AuthRailError("Invalid trace context")
+            headers["traceparent"] = traceparent
+        try:
+            async with (
+                asyncio.timeout(deadline_seconds),
+                self._http.stream(
+                    method,
+                    self._endpoint + path,
+                    headers=headers,
+                    content=snapshot(body) if body is not None else None,
+                    timeout=deadline_seconds,
+                ) as response,
+            ):
+                if response.status_code != status:
+                    raise AuthRailError(f"Sidecar returned HTTP {response.status_code}")
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(data) + len(chunk) > MAX_CONTEXT:
+                        raise AuthRailError("Sidecar response exceeds its size limit")
+                    data.extend(chunk)
+                return parse_object(bytes(data))
+        except (httpx.HTTPError, TimeoutError):
+            raise AuthRailError("Sidecar request unavailable") from None
+
     async def _check(
         self,
         call: PreparedCall,
@@ -275,6 +354,85 @@ class AsyncObserveClient:
         except Exception:
             # Do not retain provider text, exception arguments or credentials in diagnostics.
             return None, AuthRailError("Advisory check unavailable or invalid")
+
+    async def report_observed_execution(
+        self,
+        call: PreparedCall,
+        *,
+        event: str,
+        provider_idempotency_key: str,
+        provider_reference: str | None,
+    ) -> JSONObject:
+        """Report explicit executor knowledge separately from an advisory decision."""
+        if (
+            event
+            not in ("succeeded", "failed", "unknown", "reconciled_succeeded", "reconciled_failed")
+            or not _matches(_REF, provider_idempotency_key)
+            or (provider_reference is not None and not _matches(_REF, provider_reference))
+            or (event.startswith("reconciled_") and provider_reference is None)
+            or not _matches(_UUID, call.request_id)
+            or not _matches(_REF, call.action_key)
+        ):
+            raise AuthRailError("Invalid observed execution report")
+        original = call.as_dict()
+        version = original.get("operationVersionId")
+        if not _matches(_UUID, version):
+            raise AuthRailError("Invalid observed operation identity")
+        fields: JSONObject = {
+            "operationVersionId": version,
+            "actionKey": call.action_key,
+            "attemptId": call.request_id,
+            "event": event,
+            "inputSha256": hashlib.sha256(encode_input(original, "tool_call").encode()).hexdigest(),
+            "providerIdempotencyKey": provider_idempotency_key,
+            "providerReference": provider_reference,
+            "keySha256": self._key_sha256(),
+        }
+        headers = {
+            "Authorization": "Bearer " + self._token,
+            "Content-Type": "application/json",
+            "Idempotency-Key": f"{version}:{call.action_key}:{call.request_id}:{event}",
+        }
+        if call.traceparent:
+            match = _TRACE.fullmatch(call.traceparent)
+            if not match or match[1] == "0" * 32 or match[2] == "0" * 16:
+                raise AuthRailError("Invalid trace context")
+            headers["traceparent"] = call.traceparent
+        try:
+            async with (
+                asyncio.timeout(2),
+                self._http.stream(
+                    "POST",
+                    self._endpoint + "/execution/observed-receipts",
+                    headers=headers,
+                    content=snapshot(
+                        {
+                            **fields,
+                            "proof": self._sign_statement(
+                                "authrail.execution.receipt.observe.v1", fields
+                            ),
+                        }
+                    ),
+                    timeout=2,
+                ) as response,
+            ):
+                if response.status_code not in (201, 202):
+                    raise AuthRailError("Observed execution report unavailable")
+                value = await response_object(response, MAX_CONTEXT)
+                if response.status_code == 202 and value.get("recordingStatus") == "queued":
+                    return {"recordingStatus": "queued"}
+                if (
+                    response.status_code != 201
+                    or value.get("recordingStatus") != "retained"
+                    or not _matches(_UUID, value.get("receiptId"))
+                    or not _matches(_UUID, value.get("actionId"))
+                    or value.get("state") not in ("succeeded", "failed", "outcome_unknown")
+                    or type(value.get("replayed")) is not bool
+                ):
+                    raise AuthRailError("Invalid observed execution acknowledgement")
+                return value
+        except (httpx.HTTPError, TimeoutError):
+            raise AuthRailError("Observed execution report unavailable") from None
 
     def observe(
         self,
@@ -328,3 +486,32 @@ class AsyncObserveClient:
         self._pending.add(observation)
         observation.add_done_callback(self._pending.discard)
         return ObserveRun(result_task, observation, call)
+
+
+def validate_review_summary(value: JSONObject) -> None:
+    """Keep human review context bounded and safe for presentation."""
+
+    def safe(text: object, maximum: int) -> bool:
+        return (
+            type(text) is str
+            and bool(text)
+            and text.strip() == text
+            and len(text.encode("utf-8")) <= maximum
+            and not re.search(r"[\x00-\x1f\x7f<>&\u2028\u2029]", text)
+        )
+
+    fields = value.get("fields")
+    if (
+        set(value) != {"title", "fields"}
+        or not safe(value.get("title"), 120)
+        or type(fields) is not list
+        or not 1 <= len(fields) <= 8
+        or any(
+            type(item) is not dict
+            or set(item) != {"label", "value"}
+            or not safe(item.get("label"), 60)
+            or not safe(item.get("value"), 200)
+            for item in fields
+        )
+    ):
+        raise AuthRailError("Invalid approval review summary")

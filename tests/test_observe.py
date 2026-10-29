@@ -220,7 +220,11 @@ class ObserveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(destinations, ["http://127.0.0.1:7078/evaluate"])
 
     async def test_oversized_or_duplicate_json_response_is_rejected(self):
-        for body in [b'{"requestId":"a","requestId":"b"}', b"x" * (128 * 1024 + 1)]:
+        for body in [
+            b'{"requestId":"a","requestId":"b"}',
+            b"x" * (128 * 1024 + 1),
+            '{"requestId":"a"}'.encode("utf-16"),
+        ]:
             transport = httpx.MockTransport(
                 lambda req, data=body: httpx.Response(200, content=data)
             )

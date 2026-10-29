@@ -90,7 +90,10 @@ def parse_object(data: bytes) -> JSONObject:
 
     try:
         value = json.loads(
-            data, object_pairs_hook=pairs, parse_constant=invalid_constant, parse_int=integer
+            data.decode("utf-8"),
+            object_pairs_hook=pairs,
+            parse_constant=invalid_constant,
+            parse_int=integer,
         )
         if type(value) is not dict:
             raise ValueError("object required")

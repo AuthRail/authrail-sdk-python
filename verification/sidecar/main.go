@@ -29,6 +29,10 @@ func main() {
 	const revision = "00000000-0000-4000-8000-000000000004"
 	const bundle = "00000000-0000-4000-8000-000000000005"
 	const operation = "00000000-0000-4000-8000-000000000008"
+	mode := "observe"
+	if len(os.Args) > 2 {
+		mode = os.Args[2]
+	}
 	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		panic(err)
@@ -56,12 +60,36 @@ func main() {
 	manifest := map[string]any{"formatVersion": 1, "bundleId": bundle,
 		"organisationId": organisation, "deploymentId": deployment,
 		"inventoryItemId": inventory, "inventoryRevisionId": revision, "sequence": 1,
-		"mode": "observe", "issuedAt": now.Add(-time.Minute),
+		"mode": mode, "issuedAt": now.Add(-time.Minute),
 		"activeFrom": now.Add(-time.Minute), "expiresAt": now.Add(time.Hour),
 		"rails": []any{map[string]any{"railId": inventory, "versionId": revision,
 			"operationVersionId": operation, "kind": "policy", "operationContract": map[string]any{
 				"requiredCoverage": []string{"tool_call", "tool_result"}},
 			"content": map[string]any{"formatVersion": 2, "rules": rules}}}}
+	if len(os.Args) > 3 && os.Args[3] == "guard" {
+		guardRules := []map[string]any{}
+		for _, phase := range []string{"tool_call", "tool_result"} {
+			root := "arguments"
+			if phase == "tool_result" {
+				root = "result"
+			}
+			guardRules = append(guardRules, map[string]any{
+				"id": "clean", "phase": phase, "when": map[string]any{"kind": "compare",
+					"left":       map[string]any{"root": "arguments", "path": []string{"amount"}},
+					"comparison": "lte", "right": map[string]any{"kind": "literal", "value": 100}},
+				"outcome": "allow", "obligations": []any{map[string]any{"kind": "sanitize",
+					"handlerId": "redact", "handlerVersion": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"target": map[string]any{"root": root, "path": []string{"message"}}}}})
+		}
+		manifest["rails"] = append(manifest["rails"].([]any), map[string]any{
+			"railId":    "00000000-0000-4000-8000-000000000040",
+			"versionId": "00000000-0000-4000-8000-000000000041", "operationVersionId": operation,
+			"kind": "guard", "operationContract": map[string]any{
+				"requiredCoverage": []string{"tool_call", "tool_result"},
+				"availableFields": []any{map[string]any{"root": "arguments", "path": []string{"message"}, "type": "string"},
+					map[string]any{"root": "result", "path": []string{"message"}, "type": "string"}}},
+			"content": map[string]any{"formatVersion": 3, "rules": guardRules}})
+	}
 	payload, err := json.Marshal(manifest)
 	if err != nil {
 		panic(err)
@@ -73,7 +101,7 @@ func main() {
 	}
 	configuration := map[string]any{
 		"deployment": map[string]any{"organisationId": organisation, "deploymentId": deployment,
-			"inventoryItemId": inventory, "inventoryRevisionId": revision, "mode": "observe",
+			"inventoryItemId": inventory, "inventoryRevisionId": revision, "mode": mode,
 			"sequence": 1, "activeBundleId": bundle},
 		"bundle": map[string]any{"payload": base64.RawURLEncoding.EncodeToString(payload),
 			"keyId": "verification", "algorithm": "ECDSA_SHA_256",
@@ -100,8 +128,12 @@ func main() {
 	if err := syncer.Sync(context.Background()); err != nil {
 		panic(err)
 	}
-	server := httptest.NewServer(sidecar.EvaluationHandler(syncer,
-		"cccccccccccccccccccccccccccccccc"))
+	const adapterToken = "cccccccccccccccccccccccccccccccc"
+	mux := http.NewServeMux()
+	mux.Handle("/evaluate", sidecar.EvaluationHandler(syncer, adapterToken))
+	mux.Handle("/guard-requirements", sidecar.GuardRequirementsHandler(syncer, adapterToken))
+	mux.Handle("/execution/observed-receipts", sidecar.ObservedExecutionReceiptHandler(syncer, adapterToken))
+	server := httptest.NewServer(mux)
 	defer server.Close()
 	fmt.Println(server.URL)
 	// EOF lets the Python parent end this exact isolated process gracefully.

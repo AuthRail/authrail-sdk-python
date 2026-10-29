@@ -29,6 +29,7 @@ class Operation:
     resource_id: str | None = None
     fact_resolutions: list[JSONObject] = field(default_factory=list, repr=False)
     trajectory: JSONObject | None = field(default=None, repr=False)
+    review_summary: JSONObject | None = field(default=None, repr=False)
     traceparent: str | None = None
 
 
@@ -50,7 +51,7 @@ class PreparedCall:
 
 @dataclass(frozen=True)
 class Decision:
-    """Advisory rule outcome; it neither enforces a boundary nor proves execution."""
+    """A rule decision; it does not by itself execute a tool or prove its effect."""
 
     request_id: str
     outcome: str
