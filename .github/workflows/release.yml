@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, without v prefix'
+        required: true
+        default: '0.1.0'
+        type: string
+      publish:
+        description: 'Publish after checks (requires matching tag and publisher setup)'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main' && github.repository == 'AuthRail/authrail-sdk-python'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.verify.outputs.sha }}
+      version: ${{ steps.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Verify version and release identity
+        id: verify
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          python - <<'PYCODE'
+          import json, os, re, subprocess
+          version = os.environ['RELEASE_VERSION']
+          if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
+              raise SystemExit('Use an exact MAJOR.MINOR.PATCH version.')
+          import tomllib; assert tomllib.load(open('pyproject.toml', 'rb'))['project']['version'] == version
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          subprocess.run(['git', 'merge-base', '--is-ancestor', sha, 'origin/main'], check=True)
+          if os.environ['PUBLISH'] == 'true':
+              tagged = subprocess.check_output(['git', 'rev-parse', '--verify', f'refs/tags/v{version}' + '^{commit}'], text=True).strip()
+              if tagged != sha:
+                  raise SystemExit('The release tag must already point to this exact main commit.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'sha={sha}\nversion={version}\n')
+          PYCODE
+
+  checks:
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: [prepare, checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'build>=1.2,<2' 'twine>=6,<7'
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - run: python verification/check_package.py
+      - name: Preserve the checked distributions
+        run: |
+          mv dist release
+          cd release
+          sha256sum *.whl *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-package
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: inputs.publish
+    needs: [prepare, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/authrail
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-package
+          path: release
+      - name: Verify checked artifacts
+        working-directory: release
+        run: |
+          sha256sum -c SHA256SUMS
+          rm SHA256SUMS
+      - name: Publish using PyPI trusted publishing
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: release/
+
+  github-release:
+    if: inputs.publish
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-package
+          path: release
+      - name: Publish release notes and checked distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cd release
+          sha256sum -c SHA256SUMS
+          gh release create "v$VERSION" --verify-tag --title "v$VERSION" \
+            --notes 'AuthRail Runtime adapter. See the README for setup and the compatibility guide for tested sidecar versions.' ./*

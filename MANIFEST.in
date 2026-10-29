@@ -2,3 +2,4 @@ recursive-include assets *.png
 include ARCHITECTURE.md
 recursive-include tests *.py *.json
 recursive-include verification *.py *.go *.mjs
+include RELEASING.md
