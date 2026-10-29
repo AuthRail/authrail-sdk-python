@@ -470,3 +470,5 @@ directory containing only the two artifacts for the version being checked.
 The compatibility job uses real handlers from a pinned sidecar commit and
 disposable local state. It needs no customer credentials and does not establish
 tenant or provider acceptance. CI does not publish packages.
+
+Maintainers: see [Releasing](RELEASING.md) for checked artifacts and publication setup.
