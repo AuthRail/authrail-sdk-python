@@ -1,0 +1,3 @@
+recursive-include assets *.png
+recursive-include tests *.py *.json
+recursive-include verification *.py *.go

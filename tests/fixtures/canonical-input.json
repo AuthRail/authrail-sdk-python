@@ -1,0 +1,96 @@
+{
+  "formatVersion": 1,
+  "cases": [
+    {
+      "name": "call arguments sorted",
+      "phase": "tool_call",
+      "arguments": {
+        "invoiceId": "invoice_123",
+        "amount": 40
+      },
+      "canonicalInput": "{\"arguments\":{\"amount\":40,\"invoiceId\":\"invoice_123\"}}"
+    },
+    {
+      "name": "nested ordering and escaped unsafe text",
+      "phase": "tool_call",
+      "arguments": {
+        "z": "<&>",
+        "a": {
+          "omega": " ",
+          "beta": true
+        }
+      },
+      "canonicalInput": "{\"arguments\":{\"a\":{\"beta\":true,\"omega\":\"\\u2028\"},\"z\":\"\\u003c\\u0026\\u003e\"}}"
+    },
+    {
+      "name": "result phase binds returned object",
+      "phase": "tool_result",
+      "arguments": {
+        "invoiceId": "invoice_123",
+        "amount": 40
+      },
+      "result": {
+        "status": "paid",
+        "receipt": "pay_123"
+      },
+      "canonicalInput": "{\"arguments\":{\"amount\":40,\"invoiceId\":\"invoice_123\"},\"result\":{\"receipt\":\"pay_123\",\"status\":\"paid\"}}"
+    },
+    {
+      "name": "reviewed fact and prior reads",
+      "phase": "tool_call",
+      "arguments": {
+        "invoiceId": "invoice_123"
+      },
+      "factResolutions": [
+        {
+          "sourceVersionId": "11111111-1111-4111-8111-111111111111",
+          "sourceIdentity": "customer_api",
+          "accountBoundary": "tenant_123",
+          "lookup": "invoice.read",
+          "lookupKey": "invoice_123",
+          "authenticatedExecutor": true,
+          "status": "ok",
+          "observedAt": "2026-10-21T08:00:00Z",
+          "value": {
+            "status": "open"
+          }
+        }
+      ],
+      "trajectory": {
+        "sessionId": "task_123",
+        "start": true,
+        "complete": true,
+        "priorReadOperationVersionIds": [],
+        "values": {
+          "risk": 2
+        }
+      },
+      "canonicalInput": "{\"arguments\":{\"invoiceId\":\"invoice_123\"},\"factResolutions\":[{\"sourceVersionId\":\"11111111-1111-4111-8111-111111111111\",\"sourceIdentity\":\"customer_api\",\"accountBoundary\":\"tenant_123\",\"lookup\":\"invoice.read\",\"lookupKey\":\"invoice_123\",\"authenticatedExecutor\":true,\"status\":\"ok\",\"observedAt\":\"2026-10-21T08:00:00Z\",\"value\":{\"status\":\"open\"}}],\"trajectory\":{\"sessionId\":\"task_123\",\"start\":true,\"complete\":true,\"priorReadOperationVersionIds\":[],\"values\":{\"risk\":2}}}"
+    },
+    {
+      "name": "guard processing evidence canonical ordering",
+      "phase": "tool_call",
+      "arguments": {
+        "message": "<safe>"
+      },
+      "guardEvidence": [
+        {
+          "phase": "tool_call",
+          "bundleId": "00000000-0000-4000-8000-000000000001",
+          "kind": "sanitize",
+          "handlerId": "redact",
+          "handlerVersion": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target": {
+            "root": "arguments",
+            "path": [
+              "message"
+            ]
+          },
+          "inputSha256": "24ed65044b6346a4e6fa04ef1f480bc8ff128f36eeafa6ab5d1ab3804997d28f",
+          "outputSha256": "1a1bda07bd3f1bacb01beac684dff257574a6e8366a49d9e50ab8f60459032cb"
+        }
+      ],
+      "canonicalInput": "{\"arguments\":{\"message\":\"\\u003csafe\\u003e\"},\"guardEvidence\":[{\"bundleId\":\"00000000-0000-4000-8000-000000000001\",\"handlerId\":\"redact\",\"handlerVersion\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"inputSha256\":\"24ed65044b6346a4e6fa04ef1f480bc8ff128f36eeafa6ab5d1ab3804997d28f\",\"kind\":\"sanitize\",\"outputSha256\":\"1a1bda07bd3f1bacb01beac684dff257574a6e8366a49d9e50ab8f60459032cb\",\"phase\":\"tool_call\",\"target\":{\"path\":[\"message\"],\"root\":\"arguments\"}}]}"
+    }
+  ]
+}
