@@ -472,3 +472,23 @@ disposable local state. It needs no customer credentials and does not establish
 tenant or provider acceptance. CI does not publish packages.
 
 Maintainers: see [Releasing](RELEASING.md) for checked artifacts and publication setup.
+
+### Connected server verification
+
+Maintainers with the sibling server checkout and its dependencies can check a
+built wheel against real AuthRail services and a disposable PostgreSQL container
+on macOS or Linux:
+
+```bash
+python verification/connected_server.py \
+  --wheel /absolute/path/authrail-0.1.0-py3-none-any.whl \
+  --sidecar /absolute/path/authrail-sidecar
+```
+
+Verify downloaded candidate checksums first. This installs the wheel in a fresh
+virtual environment, migrates a separate temporary database and checks allowed,
+denied and approved execution with saved continuation recovery. The server also
+checks reviewer-only inbox/email records and duplicate delivery handling. Mail
+and stream transport wake-ups are captured; no provider payment or live email
+is sent. Existing environment files, deployments and data are not used. Node
+and Go are not rerun by this Python-specific check.
