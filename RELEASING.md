@@ -1,58 +1,55 @@
 # Releasing
 
-This guide is for maintainers. Public setup remains in the README. The initial
-release version is **0.1.0**. Preparing a release does not publish it.
+This guide is for maintainers. Public installation instructions are in the README.
+The coordinated documentation refresh targets **0.1.1**; published versions are
+immutable, so never move a released tag or replace an existing package.
 
 ## Check a candidate
 
-After the release preparation has merged, run the **Release** workflow from
-`main`, with version `0.1.0` and **publish unchecked**:
+Run the **Release** workflow from `main` with publishing disabled:
 
 ```sh
-gh workflow run release.yml --ref main -f version=0.1.0 -F publish=false
+gh workflow run release.yml --ref main -f version=0.1.1 -F publish=false
 ```
 
-The workflow runs CI, builds the distributions and retains reviewable artifacts
-for 14 days. Open its run in Actions, check every job, and download the artifacts.
-These artifacts are temporary review downloads, not public releases.
+The workflow runs CI and builds reviewable artifacts, retained for 14 days.
+Inspect the run and download its artifacts. Checksum files accompany them.
+These temporary artifacts are not registry releases.
 
-## Before publishing
+## Publish a checked version
 
-Complete the connected release checks, confirm the exact main commit and tested
-sidecar/SDK combination, and obtain the owner's release approval. Create only
-that approved `v0.1.0` tag; never move a published tag. The publish workflow
-requires the tag to point to the exact main commit being run. An intervening
-main commit requires reviewing the release identity again.
+Confirm the release commit and tested SDK/sidecar combination, and create the
+matching `v0.1.1` tag at that exact main commit. The workflow rejects a missing or
+mismatched tag. Its publishing environment allows only `main`.
 
-Configure the GitHub environment below with the owner as a required reviewer
-and deployment branches restricted to `main`. Publishing is a separate manual
-Release workflow run with **publish checked**. A pull request, ordinary push
-or check-only run cannot publish.
+```sh
+gh workflow run release.yml --ref main -f version=0.1.1 -F publish=true
+```
 
-## PyPI setup
+An explicit publish run automatically follows successful CI with publishing.
+There is no additional GitHub reviewer approval. Pull requests, ordinary pushes
+and check-only runs do not publish. Inspect both registry availability and the
+GitHub release afterward; do not blindly repeat a partially completed upload.
 
-Use GitHub environment **pypi**. In the `authrail` PyPI account, open
-**Publishing → Add a new pending publisher** and choose GitHub:
+## PyPI
+
+Project: [authrail](https://pypi.org/project/authrail/).
+GitHub environment: **pypi**. The project uses this GitHub trusted publisher:
 
 | Field | Value |
 | --- | --- |
-| PyPI project | `authrail` |
+| Project | `authrail` |
 | GitHub owner | `AuthRail` |
 | Repository | `authrail-sdk-python` |
-| Workflow filename | `release.yml` |
+| Workflow | `release.yml` |
 | Environment | `pypi` |
 
-This permits the workflow to create the project on its first authorized publish.
-It does not reserve the package name or publish anything immediately. The paid
-PyPI organisation is unnecessary. No API token is used.
+The upload uses OIDC, not a stored API token. The job verifies checksums and
+publishes the checked wheel/source distribution, then creates its GitHub release.
+Existing distributions are not silently skipped or replaced. If only part of
+publication succeeds, inspect the run and registry before retrying.
 
-The publish job downloads the checked wheel/source package, verifies checksums
-and uploads those same files through PyPI trusted publishing. Its dependent job
-creates the GitHub release with the distributions. If only part of publication
-succeeds, inspect the registry and run before retrying; existing distributions
-are not silently skipped or replaced.
+After publication, verify `python -m pip install authrail==0.1.1` in an empty
+virtual environment and exercise the connected Runtime flow.
 
-After publication, install `authrail==0.1.0` in an empty environment and exercise
-the connected Runtime flow before updating the public install guide.
-
-[PyPI pending publishers](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
+[PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)

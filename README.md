@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/authrail-logo.png" alt="AuthRail" width="96" /></p>
+<p align="center"><img src="https://raw.githubusercontent.com/AuthRail/authrail-sdk-python/v0.1.1/assets/authrail-logo.png" alt="AuthRail" width="96" /></p>
 
 # AuthRail Python
 
@@ -45,21 +45,35 @@ Use the [native sidecar](https://docs.authrail.io/docs/native) when Python runs
 directly on your host. With [Docker](https://docs.authrail.io/docs/docker), the
 Python application joins the sidecar's network namespace.
 
-## Install from source
+## Install
 
-These commands install this checkout, without relying on a PyPI release:
+Create a virtual environment in your application directory and install the
+[PyPI package](https://pypi.org/project/authrail/):
 
 ```sh
-git clone --branch feat/runtime-observe-adapter https://github.com/AuthRail/authrail-sdk-python.git
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install authrail==0.1.1
+```
+
+Check `python --version` after activation. Use Python 3.11 or newer; if several
+versions are installed, create the environment with your intended interpreter,
+such as `python3.11 -m venv .venv`. Installing the SDK does not start the sidecar.
+
+<details>
+<summary>Install from source when contributing</summary>
+
+```sh
+git clone https://github.com/AuthRail/authrail-sdk-python.git
 cd authrail-sdk-python
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install .
+python -m pip install -e '.[dev]'
 ```
 
-Check `python --version` after activation. If your machine has several Python
-versions, create the environment with the intended interpreter, such as
-`python3.11 -m venv .venv`.
+Follow [Verify a source change](#verify-a-source-change) before submitting changes.
+
+</details>
 
 ## Observe a function
 
@@ -471,7 +485,7 @@ The compatibility job uses real handlers from a pinned sidecar commit and
 disposable local state. It needs no customer credentials and does not establish
 tenant or provider acceptance. CI does not publish packages.
 
-Maintainers: see [Releasing](RELEASING.md) for checked artifacts and publication setup.
+Maintainers: see [Releasing](https://github.com/AuthRail/authrail-sdk-python/blob/main/RELEASING.md) for checked artifacts and publication setup.
 
 ### Connected server verification
 
@@ -481,7 +495,7 @@ on macOS or Linux:
 
 ```bash
 python verification/connected_server.py \
-  --wheel /absolute/path/authrail-0.1.0-py3-none-any.whl \
+  --wheel /absolute/path/authrail-0.1.1-py3-none-any.whl \
   --sidecar /absolute/path/authrail-sidecar
 ```
 
