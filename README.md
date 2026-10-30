@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/authrail-logo.png" alt="AuthRail" width="96" /></p>
+<p align="center"><img src="https://raw.githubusercontent.com/AuthRail/authrail-sdk-python/v0.1.1/assets/authrail-logo.png" alt="AuthRail" width="96" /></p>
 
 # AuthRail Python
 
@@ -485,7 +485,7 @@ The compatibility job uses real handlers from a pinned sidecar commit and
 disposable local state. It needs no customer credentials and does not establish
 tenant or provider acceptance. CI does not publish packages.
 
-Maintainers: see [Releasing](RELEASING.md) for checked artifacts and publication setup.
+Maintainers: see [Releasing](https://github.com/AuthRail/authrail-sdk-python/blob/main/RELEASING.md) for checked artifacts and publication setup.
 
 ### Connected server verification
 
