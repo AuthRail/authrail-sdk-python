@@ -128,6 +128,50 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(checked[0]["arguments"]["message"], "[REDACTED]")
         self.assertEqual(len(checked[1]["guardEvidence"]), 2)
 
+    async def test_sensitive_data_processors_and_withholding_bind_exact_output(self):
+        handlers = [
+            ("authrail_redact_email_v1",
+             "9773bce1f804773de4e773f4fedbc3f8a15785d26e70e49ad7b600eb631ea49d",
+             "[REDACTED]", [
+                 ("Contact jane.doe+test@example.co.uk.", True), ("a@EXAMPLE.COM", True),
+                 ("a..b@example.com", False), ("a.@example.com", False),
+                 ("a@example.c", False), ("_name@example.com", False),
+                 ("name@example.com_", False), ("a" * 65 + "@example.com", False),
+                 ("ordinary reply", False),
+             ]),
+            ("authrail_redact_payment_card_v1",
+             "01c828b26465d66ad89cb6a350c82d9afa1d8673ee8e167acfc33bde27c1535b",
+             "[REDACTED]", [
+                 ("Card 4111 1111 1111 1111.", True), ("378282246310005", True),
+                 ("4242-4242-4242-4242", True), ("4111111111111112", False),
+                 ("0000000000000000", False), ("41111111111111111111", False),
+                 ("４１１１１１１１１１１１１１１１", False), ("invoice 123456", False),
+             ]),
+            ("authrail_withhold_field_v1",
+             "3ebd6aaea66cbd30459938a624b0f74d6bea612e28d6638273a67145b2fe5555",
+             "[WITHHELD]", [("arbitrary protected information", True), ("", True)]),
+        ]
+        for identifier, version, replacement, samples in handlers:
+            for phase in ["tool_call", "tool_result"]:
+                for text, detected in samples:
+                    with self.subTest(handler=identifier, phase=phase, text=text):
+                        value = plan(phase)
+                        value["requirements"][0].update(
+                            handlerId=identifier, handlerVersion=version
+                        )
+                        original = {"message": text, "kept": True}
+                        result = await process_guard(
+                            value, VERSION, phase, original, registered_handlers(None)
+                        )
+                        expected = replacement if detected else text
+                        self.assertEqual(result.output, {"message": expected, "kept": True})
+                        self.assertEqual(original["message"], text)
+                        self.assertEqual(result.evidence[0]["outputSha256"],
+                                         hashlib.sha256(canonical(expected).encode()).hexdigest())
+            with self.assertRaises(AuthRailError):
+                registered_handlers([GuardHandler(id=identifier, version="f" * 64,
+                                                  kind="sanitize", process=lambda text: text)])
+
     async def test_exact_handler_processes_a_copy_and_binds_output_digest(self):
         original = {"message": "SECRET", "untouched": "value"}
         result = await process_guard(

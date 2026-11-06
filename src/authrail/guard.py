@@ -40,6 +40,59 @@ def _redact_credentials(text: str) -> str:
     return text
 
 
+_EMAIL_CANDIDATES = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._%+-]{0,63}@[A-Za-z0-9]"
+    r"(?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
+)
+_CARD_CANDIDATES = re.compile(r"[0-9](?:[0-9 -]*[0-9])?")
+
+
+def _email_address_v1(text: str) -> bool:
+    for match in _EMAIL_CANDIDATES.finditer(text):
+        before = text[match.start() - 1] if match.start() else ""
+        after = text[match.end()] if match.end() < len(text) else ""
+        if re.fullmatch(r"[A-Za-z0-9._%+@-]", before) or re.fullmatch(r"[A-Za-z0-9_@-]", after):
+            continue
+        candidate = match.group()
+        local, domain = candidate.split("@")
+        last = domain.rsplit(".", 1)[-1]
+        if (len(candidate) <= 254 and ".." not in local and not local.endswith(".")
+                and re.fullmatch(r"[A-Za-z]{2,63}", last)):
+            return True
+    return False
+
+
+def _payment_card_v1(text: str) -> bool:
+    for match in _CARD_CANDIDATES.finditer(text):
+        digits = match.group().replace(" ", "").replace("-", "")
+        if not 13 <= len(digits) <= 19 or len(set(digits)) == 1:
+            continue
+        total = 0
+        for index, character in enumerate(reversed(digits)):
+            digit = int(character)
+            if index % 2:
+                digit *= 2
+                if digit > 9:
+                    digit -= 9
+            total += digit
+        if total % 10 == 0:
+            return True
+    return False
+
+
+def _redact_email(text: str) -> str:
+    return "[REDACTED]" if _email_address_v1(text) else text
+
+
+def _redact_payment_card(text: str) -> str:
+    return "[REDACTED]" if _payment_card_v1(text) else text
+
+
+def _withhold_field(_text: str) -> str:
+    return "[WITHHELD]"
+
+
 @dataclass(frozen=True, kw_only=True)
 class GuardHandler:
     """Pure processing for one reviewed handler version; it never performs a business effect."""
@@ -59,9 +112,21 @@ def registered_handlers(
         kind="sanitize",
         process=_redact_credentials,
     )
+    builtins = [builtin,
+        GuardHandler(id="authrail_redact_email_v1",
+                     version="9773bce1f804773de4e773f4fedbc3f8a15785d26e70e49ad7b600eb631ea49d",
+                     kind="sanitize", process=_redact_email),
+        GuardHandler(id="authrail_redact_payment_card_v1",
+                     version="01c828b26465d66ad89cb6a350c82d9afa1d8673ee8e167acfc33bde27c1535b",
+                     kind="sanitize", process=_redact_payment_card),
+        GuardHandler(id="authrail_withhold_field_v1",
+                     version="3ebd6aaea66cbd30459938a624b0f74d6bea612e28d6638273a67145b2fe5555",
+                     kind="sanitize", process=_withhold_field),
+    ]
     registered: dict[tuple[str, str, str], GuardHandler] = {
-        (builtin.id, builtin.version, builtin.kind): builtin
+        (item.id, item.version, item.kind): item for item in builtins
     }
+    reserved = {item.id for item in builtins}
     if handlers is None:
         return registered
     if len(handlers) > 64:
@@ -69,7 +134,7 @@ def registered_handlers(
     for handler in handlers:
         if (
             not isinstance(handler, GuardHandler)
-            or handler.id == _CREDENTIAL_HANDLER_ID
+            or handler.id in reserved
             or not _matches(_IDENTIFIER, handler.id)
             or not _matches(_DIGEST, handler.version)
             or handler.kind not in ("sanitize", "transform")
