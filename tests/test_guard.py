@@ -15,6 +15,8 @@ from authrail.guard import process_guard, registered_handlers
 
 BUNDLE = "00000000-0000-4000-8000-000000000030"
 HANDLER_VERSION = "a" * 64
+BUILTIN_ID = "authrail_redact_credentials_v1"
+BUILTIN_VERSION = "cea4d8ac57cc39a33a9584742b56e412ff889026cb6b69b086bccbe4cc25d833"
 
 
 def plan(phase="tool_call"):
@@ -51,6 +53,81 @@ def handler():
 
 
 class GuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_builtin_redacts_supported_credentials_without_custom_registration(self):
+        value = plan()
+        value["requirements"][0].update(handlerId=BUILTIN_ID, handlerVersion=BUILTIN_VERSION)
+        credentials = [
+            "-----BEGIN PRIVATE KEY-----",
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "-----BEGIN EC PRIVATE KEY-----",
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            *["gh" + prefix + "_" + "a" * 36 for prefix in "pousr"],
+            "github_pat_" + "a_" * 41,
+            "AKIA" + "A1" * 8,
+            "ASIA" + "Z9" * 8,
+        ]
+        for credential in credentials:
+            with self.subTest(credential=credential[:20]):
+                original = {"message": "before: " + credential + " after", "other": "safe"}
+                result = await process_guard(
+                    value, VERSION, "tool_call", original, registered_handlers(None)
+                )
+                self.assertEqual(result.output, {"message": "[REDACTED]", "other": "safe"})
+                self.assertNotEqual(original, result.output)
+                self.assertEqual(result.evidence[0]["handlerVersion"], BUILTIN_VERSION)
+
+    async def test_builtin_preserves_safe_text_and_requires_exact_ascii_token_boundaries(self):
+        value = plan()
+        value["requirements"][0].update(handlerId=BUILTIN_ID, handlerVersion=BUILTIN_VERSION)
+        token = "ghp_" + "a" * 36
+        for text in [
+            "ordinary message", "DEMO_SECRET", "ghp_" + "a" * 35,
+            token + "a", "a" + token, "_" + token, token + "_",
+            "github_pat_" + "a" * 81, "github_pat_" + "a" * 83,
+            "AKIA" + "a" * 16, "AKIA" + "A" * 17,
+        ]:
+            with self.subTest(text=text):
+                result = await process_guard(
+                    value, VERSION, "tool_call", {"message": text}, registered_handlers([])
+                )
+                self.assertEqual(result.output["message"], text)
+        result = await process_guard(
+            value, VERSION, "tool_call", {"message": "é" + token + "é"}, registered_handlers(None)
+        )
+        self.assertEqual(result.output["message"], "[REDACTED]")
+
+    async def test_builtin_identity_cannot_be_overridden_even_at_a_different_version(self):
+        for version, kind in [(BUILTIN_VERSION, "sanitize"), ("a" * 64, "transform")]:
+            with self.assertRaises(AuthRailError):
+                registered_handlers([GuardHandler(
+                    id=BUILTIN_ID, version=version, kind=kind, process=lambda text: text
+                )])
+
+    async def test_default_enforce_processes_builtin_before_call_and_result_release(self):
+        transport = Transport()
+        checked = []
+
+        def request(req):
+            if req.method == "GET":
+                value = plan(req.url.params["phase"])
+                value["requirements"][0].update(
+                    handlerId=BUILTIN_ID, handlerVersion=BUILTIN_VERSION
+                )
+                return httpx.Response(200, json=value)
+            if req.url.path == "/evaluate":
+                checked.append(json.loads(req.content))
+            return transport(req)
+
+        async with client(request) as sdk:
+            async def execute(arguments, context):
+                self.assertEqual(arguments["message"], "[REDACTED]")
+                return {"message": "-----BEGIN PRIVATE KEY-----"}
+
+            result = await sdk.enforce(operation(), {"message": "ghp_" + "a" * 36}, execute)
+        self.assertEqual(result.result, {"message": "[REDACTED]"})
+        self.assertEqual(checked[0]["arguments"]["message"], "[REDACTED]")
+        self.assertEqual(len(checked[1]["guardEvidence"]), 2)
+
     async def test_exact_handler_processes_a_copy_and_binds_output_digest(self):
         original = {"message": "SECRET", "untouched": "value"}
         result = await process_guard(

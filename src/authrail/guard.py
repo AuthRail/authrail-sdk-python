@@ -19,6 +19,25 @@ _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,79}\Z")
 _SEGMENT = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,79}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _FORBIDDEN = {"__proto__", "prototype", "constructor"}
+_CREDENTIAL_HANDLER_ID = "authrail_redact_credentials_v1"
+_CREDENTIAL_HANDLER_VERSION = "cea4d8ac57cc39a33a9584742b56e412ff889026cb6b69b086bccbe4cc25d833"
+_PRIVATE_KEY_MARKERS = (
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "-----BEGIN EC PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+)
+_CREDENTIAL_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{36}|"
+    r"github_pat_[A-Za-z0-9_]{82}|(?:AKIA|ASIA)[A-Z0-9]{16})(?![A-Za-z0-9_])"
+)
+
+
+def _redact_credentials(text: str) -> str:
+    # Replace the whole reviewed field so token fragments cannot survive redaction.
+    if any(marker in text for marker in _PRIVATE_KEY_MARKERS) or _CREDENTIAL_TOKEN.search(text):
+        return "[REDACTED]"
+    return text
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -34,7 +53,15 @@ class GuardHandler:
 def registered_handlers(
     handlers: Sequence[GuardHandler] | None,
 ) -> dict[tuple[str, str, str], GuardHandler]:
-    registered: dict[tuple[str, str, str], GuardHandler] = {}
+    builtin = GuardHandler(
+        id=_CREDENTIAL_HANDLER_ID,
+        version=_CREDENTIAL_HANDLER_VERSION,
+        kind="sanitize",
+        process=_redact_credentials,
+    )
+    registered: dict[tuple[str, str, str], GuardHandler] = {
+        (builtin.id, builtin.version, builtin.kind): builtin
+    }
     if handlers is None:
         return registered
     if len(handlers) > 64:
@@ -42,6 +69,7 @@ def registered_handlers(
     for handler in handlers:
         if (
             not isinstance(handler, GuardHandler)
+            or handler.id == _CREDENTIAL_HANDLER_ID
             or not _matches(_IDENTIFIER, handler.id)
             or not _matches(_DIGEST, handler.version)
             or handler.kind not in ("sanitize", "transform")

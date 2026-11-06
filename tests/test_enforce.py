@@ -30,6 +30,7 @@ APPROVAL = "00000000-0000-4000-8000-000000000011"
 PERMIT = "00000000-0000-4000-8000-000000000012"
 RECEIPT = "00000000-0000-4000-8000-000000000013"
 KEY = Ed25519PrivateKey.from_private_bytes(bytes(32))
+BUNDLE = "00000000-0000-4000-8000-000000000030"
 
 
 def operation():
@@ -68,6 +69,19 @@ class Transport:
         KEY.public_key().verify(signature, json.dumps(statement, separators=(",", ":")).encode())
 
     def __call__(self, request):
+        if request.method == "GET" and request.url.path == "/guard-requirements":
+            return httpx.Response(
+                200,
+                json={
+                    "formatVersion": 1,
+                    "operationVersionId": VERSION,
+                    "phase": request.url.params["phase"],
+                    "bundleId": BUNDLE,
+                    "sequence": 1,
+                    "coverage": "evaluated",
+                    "requirements": [],
+                },
+            )
         body = json.loads(request.content)
         self.requests.append((request.url.path, body))
         if request.url.path == "/evaluate":
@@ -80,6 +94,8 @@ class Transport:
                 recordingStatus="retained",
                 reportReplayed=False,
                 actionId=ACTION,
+                bundleId=BUNDLE,
+                sequence=1,
             )
             if self.need_approval:
                 value.update(outcome="approval_required")

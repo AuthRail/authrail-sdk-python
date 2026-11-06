@@ -254,7 +254,7 @@ class AsyncEnforceClient:
         )
         self._organisation_id = organisation_id
         self._deployment_id = deployment_id
-        self._guard_processing = guard_handlers is not None
+        self._guard_processing = True
         self._handlers = registered_handlers(guard_handlers)
         self._pending: weakref.WeakKeyDictionary[
             EnforceBlockedError, tuple[ApprovalContinuation, Executor]
