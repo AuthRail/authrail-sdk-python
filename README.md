@@ -297,91 +297,31 @@ invalid value produces `untrusted`. Neither supplies a passing fact. Do not
 replace an unread balance with zero. The sidecar checks the reviewed source's
 freshness and failure rules.
 
-## Use contextual AI when the answer needs interpretation
+## Use AuthRail Contextual AI
 
-AuthRail's contextual AI uses a model to answer a specific question about text
-selected by your application. It can classify a payment justification, inspect
-an export or identify destructive work in a change plan. The model returns a
-Yes/No answer, category or score; your published Rail determines permission.
+Enable **AuthRail Contextual AI** on a Guard or Policy Rail when the rule needs
+to understand meaning: a code change that weakens authentication, confidential
+material in an export, or the purpose described in a payment justification.
+Describe the business rule and review the prepared question, permitted fields
+and answer before testing and publishing that exact Rail version.
 
-The supplied extractor uses **OpenAI Decisions with GPT-6 Luna**, through your
-own OpenAI account and API key. It is separate from the agent's model. The
-sidecar does not select or call that model for you.
+The SDK handles the contextual request automatically during its normal call
+and result checks. It obtains the selected assessment from the local sidecar,
+selects only its permitted fields after required local processing, and sends
+them through the sidecar to AuthRail. AuthRail returns a signed bounded finding;
+the sidecar verifies its exact request, caller, material and Rail binding and
+applies the deterministic rule. You do not supply a model key, choose a model,
+write a prompt or initialise an extractor.
 
-1. Choose the question and confidence requirement in application configuration.
-2. Calculate `openai_decisions_config_sha256(question)`. In the tenant source
-   setup, choose **AI context** and record the model, fingerprint, instructions
-   version, account, result field and limits under **Required AI reading
-   configuration**. Confirm the source and select it for the Data Rail.
-3. Copy its reviewed source version ID and use those same settings in the SDK.
-   The server stores the reviewed setup, while your application supplies the
-   actual question text and model credential.
-4. Give the extractor only the selected text that may be disclosed. Validate
-   the returned fact, then include it in the operation's `fact_resolutions`.
+With the setting off, that Rail sends no contextual request. Missing material,
+uncertainty or an unavailable service never becomes a made-up answer. Contextual
+AI cannot replace a trusted balance lookup, fix missing identity, override a
+denial or supply a required human approval.
 
-The following shows the SDK part after that review. Replace the source ID and
-account with your actual reviewed values; the other settings must also match
-what you reviewed:
-
-```python
-from authrail import (
-    DECISIONS_MODEL,
-    DecisionsQuestion,
-    ExtractionSource,
-    extract_context_fact,
-    new_openai_decisions_extractor,
-    openai_decisions_config_sha256,
-)
-from datetime import UTC, datetime
-
-question = DecisionsQuestion(
-    type="predicate",
-    instructions="Does this change plan describe deleting stored data?",
-    min_confidence=0.8,
-)
-source = ExtractionSource(
-    source_version_id="YOUR_REVIEWED_SOURCE_VERSION_ID",
-    source_identity="change-review",
-    account_boundary="YOUR_REVIEWED_ACCOUNT_ID",
-    lookup="change.read",
-    timeout_ms=2000,
-    result_path=("destructive",),
-    value_type="boolean",
-    model_id=DECISIONS_MODEL,
-    model_config_sha256=openai_decisions_config_sha256(question),
-    prompt_version="change-review-v1",
-    max_input_bytes=65536,
-    max_output_bytes=4096,
-)
-extractor = new_openai_decisions_extractor(
-    source=source,
-    question=question,
-    api_key=(private / "openai-key").read_text().strip(),
-)
-resolution = await extract_context_fact(
-    source,
-    "change_123",
-    "record:change_123",
-    datetime.now(UTC).isoformat(),
-    b"Remove the archived tables after the retention review.",
-    extractor,
-)
-```
-
-Run this inside your async application; `private` is the protected directory
-used in the earlier example. `openai-key` contains your own provider credential.
-The selected text is sent to OpenAI. This helper does not automatically remove
-protected information: select or redact fields in trusted application code
-before calling it. Do not send material the provider is not permitted to receive.
-
-The fact report contains the answer and source/model metadata, not those raw
-bytes. A refusal or low confidence stays `uncertain`; a timeout stays
-`unavailable`. A malformed or mismatched extraction cannot become a trusted
-answer. Model confidence does not override a denial or missing approval.
-
-The fingerprint helper uses Go-compatible settings bytes. The extractor also
-recognises the existing Node encoding for the exact same question/settings, so
-reviewed Node sources with HTML characters in their instructions can be reused.
+AuthRail receives the selected material for transient processing. It is not
+added to normal logs, traces or retained Actions; those retain the assessment
+status and bounded finding. Review permitted disclosure before publishing.
+See [Contextual AI](https://docs.authrail.io/docs/facts) for the full flow.
 
 ## Apply a reviewed Guard handler
 

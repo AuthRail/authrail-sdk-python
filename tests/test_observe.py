@@ -29,6 +29,21 @@ def operation(**overrides):
     return Operation(**(values | overrides))
 
 
+class LegacySidecarTransport(httpx.AsyncBaseTransport):
+    """Older sidecars return 404 for the contextual discovery route."""
+
+    def __init__(self, transport):
+        self.transport = transport
+
+    async def handle_async_request(self, request):
+        if request.method == "GET" and request.url.path == "/contextual-requirements":
+            return httpx.Response(404)
+        return await self.transport.handle_async_request(request)
+
+    async def aclose(self):
+        await self.transport.aclose()
+
+
 def client(transport=None, **overrides):
     values = dict(
         sidecar_url="http://127.0.0.1:7078",
@@ -36,7 +51,7 @@ def client(transport=None, **overrides):
         organisation_id=ORG,
         deployment_id=DEPLOYMENT,
         executor_private_key=Ed25519PrivateKey.from_private_bytes(bytes(32)),
-        transport=transport,
+        transport=LegacySidecarTransport(transport) if transport is not None else None,
     )
     return AsyncObserveClient(**(values | overrides))
 

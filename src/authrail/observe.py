@@ -17,6 +17,7 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from ._contextual import read_contextual
 from ._http import response_object
 from ._protocol import MAX_CONTEXT, MAX_VALUE, canonical, encode_input, parse_object, snapshot
 from .types import (
@@ -229,6 +230,19 @@ class AsyncObserveClient:
         body = call.as_dict()
         if body.get("reviewSummary") is not None and expected_mode != "enforce":
             raise AuthRailError("Review summary requires Enforce")
+        findings = await read_contextual(
+            self._http,
+            endpoint=self._endpoint,
+            token=self._token,
+            organisation_id=self._organisation_id,
+            deployment_id=self._deployment_id,
+            private_key=self._private,
+            call=call,
+            phase=phase,
+            result=result,
+        )
+        if findings:
+            body["contextualFindings"] = findings
         body["formatVersion"] = 1
         body["phase"] = phase
         body["identityProof"] = self._proof(call, phase, result, int(time.time()))

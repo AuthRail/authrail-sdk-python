@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from test_observe import LegacySidecarTransport
 
 from authrail import (
     ApprovalContinuation,
@@ -159,7 +160,7 @@ def client(transport, deployment=DEPLOYMENT, **kwargs):
         organisation_id=ORG,
         deployment_id=deployment,
         executor_private_key=KEY,
-        transport=httpx.MockTransport(transport),
+        transport=LegacySidecarTransport(httpx.MockTransport(transport)),
         **kwargs,
     )
 
