@@ -1,5 +1,6 @@
 """AuthRail's Python adapter for a customer-side decision runtime."""
 
+from ._data import DataResourceContext, DataSourceBinding
 from .contextual import (
     DECISIONS_MODEL,
     DecisionsQuestion,
@@ -41,6 +42,8 @@ from .types import (
 )
 
 __all__ = [
+    "DataResourceContext",
+    "DataSourceBinding",
     "GuardHandler",
     "DECISIONS_MODEL",
     "DecisionsQuestion",

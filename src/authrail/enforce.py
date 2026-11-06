@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from ._data import DataSourceBinding
 from ._protocol import MAX_VALUE, encode_input, parse_object, snapshot
 from .guard import GuardHandler, GuardProcessing, process_guard, registered_handlers
 from .observe import _REF, _UUID, AsyncObserveClient, _matches
@@ -243,6 +244,7 @@ class AsyncEnforceClient:
         executor_private_key: bytes | Ed25519PrivateKey,
         transport: httpx.AsyncBaseTransport | None = None,
         guard_handlers: Sequence[GuardHandler] | None = None,
+        data_sources: Sequence[DataSourceBinding] | None = None,
     ) -> None:
         self._sidecar = AsyncObserveClient(
             sidecar_url=sidecar_url,
@@ -251,6 +253,7 @@ class AsyncEnforceClient:
             deployment_id=deployment_id,
             executor_private_key=executor_private_key,
             transport=transport,
+            data_sources=data_sources,
         )
         self._organisation_id = organisation_id
         self._deployment_id = deployment_id
@@ -298,6 +301,7 @@ class AsyncEnforceClient:
                     call.request_id, call.action_key, call.traceparent, snapshot(data)
                 )
             decision = await self._sidecar._evaluate(call, "tool_call", "enforce")
+            call = self._sidecar._data_calls.get(call, call)
             self._check_guard_bundle(guard, decision)
         except Exception:
             raise EnforceBlockedError("tool_call", False) from None

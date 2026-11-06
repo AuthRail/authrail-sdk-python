@@ -8,7 +8,8 @@ import hashlib
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+import weakref
+from collections.abc import Awaitable, Callable, Sequence
 from types import TracebackType
 from typing import TypeVar, cast
 from urllib.parse import urlsplit
@@ -18,6 +19,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ._contextual import read_contextual
+from ._data import DataSourceBinding, registered_data_sources, resolve_data
 from ._http import response_object
 from ._protocol import MAX_CONTEXT, MAX_VALUE, canonical, encode_input, parse_object, snapshot
 from .types import (
@@ -54,6 +56,7 @@ class AsyncObserveClient:
         deployment_id: str,
         executor_private_key: bytes | Ed25519PrivateKey,
         transport: httpx.AsyncBaseTransport | None = None,
+        data_sources: Sequence[DataSourceBinding] | None = None,
     ) -> None:
         try:
             url = urlsplit(sidecar_url)
@@ -84,6 +87,10 @@ class AsyncObserveClient:
                 raise ValueError("key")
         except (ValueError, TypeError, AttributeError):
             raise AuthRailError("Invalid local sidecar configuration or Ed25519 key") from None
+        self._data_calls: weakref.WeakKeyDictionary[PreparedCall, PreparedCall] = (
+            weakref.WeakKeyDictionary()
+        )
+        self._data_sources = registered_data_sources(data_sources)
         self._endpoint = sidecar_url.rstrip("/")
         self._token = adapter_token
         self._organisation_id = organisation_id
@@ -227,6 +234,10 @@ class AsyncObserveClient:
     ) -> Decision:
         if phase not in ("tool_call", "tool_result"):
             raise AuthRailError("Invalid evaluation phase")
+        original_call = call
+        call, data_bundle, data_sequence = await resolve_data(
+            self._http, self._endpoint, self._token, self._data_sources, call, phase
+        )
         body = call.as_dict()
         if body.get("reviewSummary") is not None and expected_mode != "enforce":
             raise AuthRailError("Review summary requires Enforce")
@@ -281,6 +292,12 @@ class AsyncObserveClient:
             )
         ):
             raise AuthRailError("Invalid sidecar decision")
+        if data_bundle and (
+            value.get("bundleId") != data_bundle or value.get("sequence") != data_sequence
+        ):
+            raise AuthRailError("Data source bundle changed")
+        if phase == "tool_call" and self._data_sources is not None:
+            self._data_calls[original_call] = call
         return Decision(
             call.request_id,
             cast(str, value["outcome"]),
@@ -388,6 +405,7 @@ class AsyncObserveClient:
             or not _matches(_REF, call.action_key)
         ):
             raise AuthRailError("Invalid observed execution report")
+        call = self._data_calls.get(call, call)
         original = call.as_dict()
         version = original.get("operationVersionId")
         if not _matches(_UUID, version):
