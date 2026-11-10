@@ -264,7 +264,8 @@ class AsyncObserveClient:
             "/evaluate",
             body,
             status=200,
-            deadline_seconds=4.0 if expected_mode == "enforce" else 2.0,
+            # Enforce must wait for the sidecar's durable recording window.
+            deadline_seconds=10.0 if expected_mode == "enforce" else 2.0,
             idempotency_key=call.action_key,
             traceparent=call.traceparent,
         )

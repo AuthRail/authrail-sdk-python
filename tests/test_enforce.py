@@ -182,6 +182,32 @@ def client(transport, deployment=DEPLOYMENT, **kwargs):
 
 
 class EnforceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_retention_waits_before_running_the_callback_once(self):
+        transport = Transport()
+        released = False
+        callbacks = 0
+
+        async def delayed(request):
+            nonlocal released
+            if request.url.path == "/evaluate":
+                body = json.loads(request.content)
+                if body["phase"] == "tool_call":
+                    await asyncio.sleep(4.2)
+                    released = True
+            return transport(request)
+
+        async def execute(arguments, context):
+            nonlocal callbacks
+            self.assertTrue(released)
+            self.assertEqual(transport.requests[-1][1]["event"], "started")
+            callbacks += 1
+            return {"status": "done"}
+
+        async with client(delayed) as sdk:
+            result = await sdk.enforce(operation(), {"amount": 1}, execute)
+        self.assertEqual(result.result, {"status": "done"})
+        self.assertEqual(callbacks, 1)
+
     async def test_permission_and_fresh_start_gate_the_callback(self):
         failures = [
             {"outcome": "deny"},
