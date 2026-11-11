@@ -2,27 +2,44 @@
 
 # AuthRail Python
 
-Connect your Python application's tools to AuthRail so your team can inspect
-the requests an AI agent makes and see how your rules apply to them.
+AuthRail helps organisations control what connected AI agents may do and
+understand what happened when they acted. In the workspace, you describe an
+action, publish rules for it and review the decisions and completion reports.
+Those rules are called **Rails**.
 
-AuthRail is where your organisation reviews AI systems, defines rules and
-investigates activity. This library connects your Python functions to a local
-**sidecar**, the service that checks your deployment's selected rules. Your
-application keeps its business logic and provider credentials.
+This SDK connects a Python function to those Rails. For example, you can wrap an
+invoice reader so each agent request and returned invoice are checked by a
+**sidecar**, a small service running beside your application. The application
+keeps the business function and its provider credentials; the sidecar evaluates
+the selected rules and sends decision records to AuthRail.
 
-`AsyncObserveClient` checks a function's request and result in **Observe**. The
-function keeps running even when a rule would deny it or the sidecar cannot be
-reached. The observation tells you what was checked and what the rules decided.
-Observe is advisory; it does not prevent an operation.
-
-Use `AsyncEnforceClient` when the function must wait for permission. It checks
-the call, records the execution start, invokes your function and checks the
-result before releasing it. The setup uses the same sidecar and application key.
+Start in **Observe** to see how the rules apply while the function continues
+running. Switch to **Enforce** when the function should wait for permission;
+the SDK also checks its result before returning it to the agent. A decision
+explains permission, while a completion report describes what the application
+says it did. When an operation affects an external provider, check that provider’s
+record to establish its effect independently.
 
 [Documentation](https://docs.authrail.io) ·
 [Sidecar](https://github.com/AuthRail/authrail-sidecar) ·
-[Node SDK](https://github.com/AuthRail/authrail-sdk-node) ·
-[Go SDK](https://github.com/AuthRail/authrail-sdk-go)
+[Node.js SDK](https://github.com/AuthRail/authrail-sdk-node) ·
+[Go SDK](https://github.com/AuthRail/authrail-sdk-go) ·
+[Python SDK](https://github.com/AuthRail/authrail-sdk-python)
+
+## Choose a version
+
+The install command below selects SDK **0.1.1**, which supports Observe and
+Enforce, saved approval continuations, reconciliation, custom Guard handlers
+and explicit fact readers. The [first-application guide](https://docs.authrail.io/docs/getting-started)
+uses this release with a simple Policy Rail and a local invoice reader.
+
+Some sections below also describe newer repository source. Automatic
+Rail-owned Contextual AI, expanded built-in Guards and automatic Data reader
+bindings are not part of SDK 0.1.1. Check
+[compatibility](https://docs.authrail.io/docs/compatibility) before enabling those
+requirements. The setup executable and native Runtime are version **0.2.0**,
+while its Docker installer selects Runtime **0.1.0**; they have separate version
+identities.
 
 ## Prepare your connection
 
@@ -31,15 +48,13 @@ You need Python 3.11 or newer and an AuthRail workspace. Follow
 to register your action, confirm it, publish its Rails and create an Observe
 deployment. The action's inputs and results must match your function.
 
-From the deployment's **Integration setup**, copy the organisation and deployment
-IDs. From the confirmed action's details, copy the **Reviewed Operation Version
-ID**. Follow the [identity guide](https://docs.authrail.io/docs/identity) to
-generate your application's Ed25519 key pair and register its public key.
-
-Start the sidecar with that deployment's configuration. Your Python process
-needs its loopback URL, the local adapter token and the executor **private** key.
-The sidecar holds the deployment token and executor **public** key. Keep these
-credentials outside the agent's reach.
+Run [sidecar setup](https://docs.authrail.io/docs/native) with the API address
+supplied by your installation administrator. Sign in through the browser and
+choose the deployment. Setup creates keys and tokens in a private directory,
+registers the public key and writes `connection.json` and `integration.json`.
+Your application uses the saved `adapter-token` and `executor-private.pem`;
+the sidecar receives the deployment token and public key. Keep the generated
+files private and preserve them across restarts.
 
 Use the [native sidecar](https://docs.authrail.io/docs/native) when Python runs
 directly on your host. With [Docker](https://docs.authrail.io/docs/docker), the
@@ -77,23 +92,22 @@ Follow [Verify a source change](#verify-a-source-change) before submitting chang
 
 ## Observe a function
 
-This example reads a local invoice file. It does not transfer money or contact
-a provider. Create a private directory at `~/authrail` containing:
+This example reads a local invoice file without contacting a provider.
+Use the private directory created by guided setup; this example uses
+`$HOME/.local/share/authrail/my-deployment`. Keep its original `connection.json`,
+`adapter-token` and `executor-private.pem`. Add two separate files:
 
-- `connection.json`, with the copied IDs under the keys below.
-- `adapter-token`, containing the token configured for your local sidecar.
-- `executor-private.pem`, containing your application's private key.
-- `invoice.json`, a safe record such as `{"invoiceId":"invoice_123","status":"open"}`.
+- `example-config.json`, containing the exact action version below.
+- `invoice.json`, with safe data such as `{"invoiceId":"invoice_123","status":"open"}`.
 
-Use this shape for `connection.json`, replacing every placeholder:
+Use this shape for `example-config.json`, replacing the placeholder:
 
 ```json
-{
-  "organisation_id": "YOUR_ORGANISATION_ID",
-  "deployment_id": "YOUR_DEPLOYMENT_ID",
-  "operation_version_id": "YOUR_REVIEWED_OPERATION_VERSION_ID"
-}
+{"operation_version_id":"YOUR_REVIEWED_OPERATION_VERSION_ID"}
 ```
+
+Keep setup’s `connection.json` alongside these files, because it identifies
+the installation that the SDK will connect to.
 
 Your reviewed action must accept a text `invoiceId` and return the invoice
 fields below. Keep the files outside your checkout and readable only by your
@@ -108,13 +122,14 @@ from authrail import AsyncObserveClient, Operation
 
 
 async def main():
-    private = Path.home() / "authrail"
-    settings = json.loads((private / "connection.json").read_text())
+    private = Path.home() / ".local/share/authrail/my-deployment"
+    connection = json.loads((private / "connection.json").read_text())
+    settings = json.loads((private / "example-config.json").read_text())
     async with AsyncObserveClient(
         sidecar_url="http://127.0.0.1:7078",
         adapter_token=(private / "adapter-token").read_text().strip(),
-        organisation_id=settings["organisation_id"],
-        deployment_id=settings["deployment_id"],
+        organisation_id=connection["organisationId"],
+        deployment_id=connection["deploymentId"],
         executor_private_key=(private / "executor-private.pem").read_bytes(),
     ) as client:
         operation = Operation(
@@ -156,11 +171,11 @@ exception. `run.observation` completes separately with the call and result
 checks. Await both before closing the client or ending the process. Reuse a
 client across requests instead of creating a connection pool for each call.
 
-The user, session and invoice IDs above are fixed for demonstration. Derive
-them from authenticated application state and trusted resource lookups in your
-own application. Do not accept identity claims from the agent. Keep an action
-key stable for retries of the same business request; another request needs
-another key.
+The sample uses fixed user, session and invoice IDs so you can try the SDK
+without building a login flow. In your application, get the caller from login
+or service authentication and look up the invoice that caller may access.
+Reuse the action key when recovering the same request and choose another key
+for new work.
 
 ## Inspect the decisions
 
@@ -172,10 +187,11 @@ decide while your function runs.
 - `queued`: the sidecar saved the report locally for delivery.
 - `unavailable`: recording could not be established.
 
-A decision is separate from an execution receipt or proof of a provider effect.
-This wrapper does not infer execution success from a rule outcome. A function
-exception does not manufacture a successful result check. For missing checks,
-inspect their errors and the [sidecar logs](https://docs.authrail.io/docs/operations).
+The decision tells you how the rule applied; the function result tells you
+what your code returned. A failed function has no successful result to check.
+If either check is missing, inspect its error and the
+[sidecar logs](https://docs.authrail.io/docs/operations). You would also check
+the provider’s own record before treating a write as independently verified.
 
 Arguments and results must be JSON objects, each at most 64 KiB. Context is
 copied before asynchronous checks so caller changes cannot alter signed input.
@@ -190,7 +206,9 @@ Before changing your deployment to Enforce, review
 have another route to your protected function or provider credentials.
 
 Create `AsyncEnforceClient` with the same connection arguments used above.
-Its callback receives the **checked arguments** and an **execution context**:
+Its callback receives the **checked arguments** and an **execution context**,
+which identifies the attempt and carries the provider idempotency key used
+for recovery:
 
 ```python
 async def read_invoice(checked_arguments, execution):
@@ -204,11 +222,12 @@ checked = await client.enforce(operation, {"invoiceId": "invoice_123"}, read_inv
 invoice = checked.result
 ```
 
-This replaces the `observe` call and its two awaitables in the earlier example.
-The function runs only after the call is allowed, its decision is retained in
-AuthRail, and a fresh execution-start report is acknowledged. A queued decision
-is insufficient. After the callback, completion is reported and its result is
-checked. An allowed call does not guarantee that its result will be released.
+Replace the earlier `observe` call and its two awaitables with this pattern.
+Before invoking the callback, the SDK obtains permission and waits for AuthRail
+to save both the decision and execution-start report. A report still queued
+locally cannot authorise execution. After the callback returns, the SDK reports
+completion and checks the result; that check may withhold output even though
+the operation has already happened.
 
 For a function that changes provider data, persist `execution.as_dict()` with
 your business request before the provider call, and use
@@ -240,10 +259,11 @@ After the request is approved:
   `recover_approval_from(continuation, callback)`. This reads the existing permit
   rather than issuing another one.
 
-Your application must arrange the later resume step. An approval does not
-automatically wake a worker or make a payment. Expired, mismatched and replayed
-requests cannot authorize another callback. Do not change the approved amount
-or recipient; a different request needs a new check.
+Your application arranges the later resume step, for example through its
+existing task worker. Approval itself does not wake that worker or make a
+payment. Resumption uses the original request while its permission is valid;
+changing the amount or recipient needs a new check. An expired, mismatched
+or already-used request cannot start another callback.
 
 ### When the outcome is uncertain
 
@@ -268,13 +288,11 @@ an invoice, for example, it may need the remaining balance from the correct
 QuickBooks account. That lookup produces a **fact**; the Rail uses the fact to
 decide permission.
 
-Create and review the source in **Rails → Create Rail → Data Rail → Continue**.
-Choose the provider or application source, then select it for the action's Data
-Rail. Open that Rail's **Integration details** (or **Source details for
-developers** in its editor) to obtain the exact source version ID and reviewed
-settings. A displayed version number such as `1` is not its UUID.
-
-Choose the reader that matches that reviewed source:
+Create the source in **Rails → Create Rail → Data Rail → Continue** and select
+it for the action’s Data Rail. In **Integration details**, or **Source details
+for developers** in the editor, copy the source version ID and its settings.
+That ID identifies the source definition the sidecar will check; a displayed
+revision number such as `1` is not the ID. Use the reader for that source:
 
 | Helper | What it reads |
 | --- | --- |
@@ -292,36 +310,42 @@ storage and revocation. A management-plane Connection in AuthRail does not
 provide Runtime write credentials. Never let the agent choose the source URL,
 provider account, access token or lookup implementation.
 
-An unavailable source produces `unavailable`; an account/resource mismatch or
-invalid value produces `untrusted`. Neither supplies a passing fact. Do not
-replace an unread balance with zero. The sidecar checks the reviewed source's
-freshness and failure rules.
+If the source cannot be read, the result is `unavailable`. A mismatched
+account or record, or an invalid value, is `untrusted`. The sidecar applies the
+source’s freshness and failure rules to those states; an unread balance remains
+unknown rather than becoming zero.
 
 ## Use AuthRail Contextual AI
 
-Enable **AuthRail Contextual AI** on a Guard or Policy Rail when the rule needs
-to understand meaning: a code change that weakens authentication, confidential
-material in an export, or the purpose described in a payment justification.
-Describe the business rule and review the prepared question, permitted fields
-and answer before testing and publishing that exact Rail version.
+The integration in this section is available in current source, but not in
+published SDK 0.1.1. Choose a compatible released SDK and Runtime before using
+it in an installed application.
 
-The SDK handles the contextual request automatically during its normal call
-and result checks. It obtains the selected assessment from the local sidecar,
-selects only its permitted fields after required local processing, and sends
-them through the sidecar to AuthRail. AuthRail returns a signed bounded finding;
-the sidecar verifies its exact request, caller, material and Rail binding and
-applies the deterministic rule. You do not supply a model key, choose a model,
-write a prompt or initialise an extractor.
+Some rules need to understand meaning as well as compare values. For example,
+a release rule might ask whether a code change weakens authentication. Enable
+**AuthRail Contextual AI** on the Guard or Policy Rail, describe the rule and
+review the question, permitted fields and answer that AuthRail prepares. Test
+those choices before publishing the Rail.
 
-With the setting off, that Rail sends no contextual request. Missing material,
-uncertainty or an unavailable service never becomes a made-up answer. Contextual
-AI cannot replace a trusted balance lookup, fix missing identity, override a
-denial or supply a required human approval.
+During a call or result check, the SDK obtains that assessment from the sidecar,
+applies any required local processing and selects the permitted material. It
+sends that material through the sidecar to AuthRail for interpretation. AuthRail
+returns a signed finding, which the sidecar verifies against the request,
+caller, material and Rail version before using it in the rule. AuthRail operates
+the interpretation service, so your application does not need model credentials,
+a prompt or a separately configured extractor.
 
-AuthRail receives the selected material for transient processing. It is not
-added to normal logs, traces or retained Actions; those retain the assessment
-status and bounded finding. Review permitted disclosure before publishing.
-See [Contextual AI](https://docs.authrail.io/docs/facts) for the full flow.
+If Contextual AI is off for the Rail, it sends no contextual request. If the
+assessment is uncertain, material is missing or the service is unavailable, the
+rule cannot pass using an invented answer. Ordinary authentication, data lookups
+and human approval still apply; interpretation supplies information to a rule,
+not permission to perform the action.
+
+Review disclosure before publication because AuthRail receives the selected
+material for transient processing. Normal Actions, logs and traces exclude that
+material and retain the assessment status and finding instead. The
+[Contextual AI guide](https://docs.authrail.io/docs/facts) explains this flow
+and its failure handling.
 
 ## Apply a reviewed Guard handler
 
@@ -340,12 +364,15 @@ handler = GuardHandler(
 )
 ```
 
-This removes a demo marker, not arbitrary sensitive data. Use your reviewed
-implementation and its exact 64-character hexadecimal version fingerprint.
-The sidecar's plan selects the field; a handler cannot choose another target.
-Processing uses a copy, signs evidence for the changed string and checks the
-same bundle before proceeding. Missing handlers, unsupported isolation or a
-changed configuration stop the boundary. Observe does not run handlers.
+This example removes only the literal `DEMO_SECRET` marker. It is useful for
+learning the handler interface, rather than detecting arbitrary sensitive
+information. For your own handler, use its 64-character hexadecimal version
+fingerprint and the ID and kind configured in the Guard.
+
+The sidecar’s plan selects the string field. The SDK processes a copy, signs
+the input and output digests and checks that the same rule bundle still
+applies. If a handler is missing, the configuration changes or isolation
+cannot be provided, Enforce stops. Observe does not run these handlers.
 
 Handlers may be synchronous or async, but must be pure string processing with
 no business effects. Late answers are rejected. Custom readers and handlers
