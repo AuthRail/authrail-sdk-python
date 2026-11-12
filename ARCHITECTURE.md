@@ -25,7 +25,9 @@ outside the agent's reach; a local checker cannot close an unrelated bypass.
 
 ## Signing and snapshots
 
-Arguments and result objects are bounded at64KiB; context and responses at128KiB.
+Arguments and result objects are bounded at64KiB; prepared context and responses
+at128KiB. Complete evaluation requests are bounded at512KiB to carry both objects
+with their bounded findings, processing evidence and identity proof.
 Input snapshots detach mutable caller objects. Signatures use the same ordered
 statements, sorted JSON maps, HTML escaping and number notation as the Go
 sidecar. Non-finite values and unsafe Python integers are rejected rather than

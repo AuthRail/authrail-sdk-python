@@ -134,6 +134,24 @@ class ProtocolTests(unittest.TestCase):
 
 
 class ObserveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bounded_arguments_and_result_fit_evaluation_envelope(self):
+        value = {"value": "x" * (64 * 1024 - len(b'{"value":""}'))}
+        requests = []
+
+        def respond(request):
+            requests.append(request.content)
+            self.assertGreater(len(request.content), 128 * 1024)
+            self.assertLessEqual(len(request.content), 512 * 1024)
+            body = json.loads(request.content)
+            self.assertEqual(body["arguments"], value)
+            self.assertEqual(body["result"], value)
+            return decision(request)
+
+        async with client(httpx.MockTransport(respond)) as sdk:
+            prepared = sdk.prepare(operation(), value)
+            await sdk.evaluate(prepared, "tool_result", value)
+        self.assertEqual(len(requests), 1)
+
     async def test_denial_is_advisory_and_result_check_uses_original_snapshot(self):
         release = asyncio.Event()
         seen = []

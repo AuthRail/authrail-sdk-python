@@ -21,7 +21,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ._contextual import read_contextual
 from ._data import DataSourceBinding, registered_data_sources, resolve_data
 from ._http import response_object
-from ._protocol import MAX_CONTEXT, MAX_VALUE, canonical, encode_input, parse_object, snapshot
+from ._protocol import (
+    MAX_CONTEXT,
+    MAX_EVALUATION_REQUEST,
+    MAX_VALUE,
+    canonical,
+    encode_input,
+    parse_object,
+    snapshot,
+)
 from .types import (
     AuthRailError,
     Decision,
@@ -358,7 +366,9 @@ class AsyncObserveClient:
                     method,
                     self._endpoint + path,
                     headers=headers,
-                    content=snapshot(body) if body is not None else None,
+                    content=snapshot(
+                        body, MAX_EVALUATION_REQUEST if path == "/evaluate" else MAX_CONTEXT
+                    ) if body is not None else None,
                     timeout=deadline_seconds,
                 ) as response,
             ):

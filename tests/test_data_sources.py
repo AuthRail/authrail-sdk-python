@@ -5,7 +5,7 @@ import hashlib
 import json
 import time
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 
 import httpx
@@ -213,3 +213,86 @@ class DataSourceTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(shared["balance"], 999)
         self.assertEqual(resolved.as_dict()["factResolutions"][0]["value"]["balance"], 80)
+
+    async def test_one_source_deadline_or_cancellation_preserves_completed_sibling_facts(self):
+        second_source = "88888888-8888-4888-8888-888888888888"
+        stopped = asyncio.Event()
+
+        class TwoSources(DataTransport):
+            def __call__(self, request):
+                response = super().__call__(request)
+                if request.url.path == "/data-requirements":
+                    plan = response.json()
+                    plan["requirements"].append(
+                        {"sourceVersionId": second_source, "contract": contract()}
+                    )
+                    return httpx.Response(200, json=plan)
+                return response
+
+        async def slow_resource(_):
+            try:
+                await asyncio.sleep(10)
+            finally:
+                stopped.set()
+            return "invoice_123"
+
+        async def cancelled_resource(_):
+            raise asyncio.CancelledError
+
+        healthy = self.binding()
+        for resolve in (slow_resource, cancelled_resource):
+            with self.subTest(source=resolve.__name__):
+                slow = replace(healthy, source_version_id=second_source, resolve_resource=resolve)
+                async with client(TwoSources()) as sdk:
+                    call = sdk._sidecar.prepare(operation(), {"invoiceId": "invoice_123"})
+                    resolved, _, _ = await resolve_data(
+                        sdk._sidecar._http, sdk._sidecar._endpoint, sdk._sidecar._token,
+                        registered_data_sources([healthy, slow]), call, "tool_call",
+                    )
+                facts = resolved.as_dict()["factResolutions"]
+                self.assertEqual([fact["status"] for fact in facts], ["ok", "unavailable"])
+                self.assertEqual(facts[0]["value"], {"balance": 80})
+        await asyncio.wait_for(stopped.wait(), timeout=1)
+
+    async def test_queued_sources_finish_before_returning_after_sibling_deadlines(self):
+        source_ids = [f"77777777-7777-4777-8777-{index:012d}" for index in range(8)]
+        started = []
+        stopped = []
+
+        class ManySources(DataTransport):
+            def __call__(self, request):
+                response = super().__call__(request)
+                if request.url.path == "/data-requirements":
+                    plan = response.json()
+                    plan["requirements"] = [
+                        {"sourceVersionId": source_id, "contract": contract()}
+                        for source_id in source_ids
+                    ]
+                    return httpx.Response(200, json=plan)
+                return response
+
+        def binding(source_id):
+            async def resolve(_):
+                started.append(source_id)
+                try:
+                    await asyncio.sleep(10)
+                finally:
+                    stopped.append(source_id)
+                return "invoice_123"
+
+            return replace(self.binding(), source_version_id=source_id, resolve_resource=resolve)
+
+        async with client(ManySources()) as sdk:
+            call = sdk._sidecar.prepare(operation(), {"invoiceId": "invoice_123"})
+            resolved, _, _ = await resolve_data(
+                sdk._sidecar._http, sdk._sidecar._endpoint, sdk._sidecar._token,
+                registered_data_sources([binding(source_id) for source_id in source_ids]),
+                call, "tool_call",
+            )
+            self.assertCountEqual(started, source_ids)
+            self.assertEqual(
+                [fact["status"] for fact in resolved.as_dict()["factResolutions"]],
+                ["unavailable"] * 8,
+            )
+            await asyncio.sleep(0.15)
+            self.assertCountEqual(stopped, source_ids)

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import httpx
 
-from ._async import with_deadline
+from ._async import _consume, with_deadline
 from ._http import response_object, valid_secret
 from .types import AuthRailError, JSONObject, JSONValue, Phase, PreparedCall
 
@@ -254,15 +254,7 @@ async def resolve_data(
     semaphore = asyncio.Semaphore(4)
     deadline = asyncio.get_running_loop().time() + 10
 
-    async def read_one(source_id: str, c: JSONObject) -> JSONObject:
-        source_deadline = asyncio.get_running_loop().time() + cast(int, c["timeoutMs"]) / 1000
-        from .facts import (
-            CustomerSource,
-            lookup_customer_fact,
-            lookup_quickbooks_invoice_balance,
-            lookup_stripe_invoice_status,
-        )
-
+    def unavailable_fact(source_id: str, c: JSONObject) -> JSONObject:
         base: JSONObject = {
             "sourceVersionId": source_id,
             "lookup": c["lookup"],
@@ -280,6 +272,21 @@ async def resolve_data(
         if type(lookup) is not str or not lookup or len(lookup.encode()) > 256:
             return base
         base["lookupKey"] = lookup
+        return base
+
+    async def read_one(source_id: str, c: JSONObject) -> JSONObject:
+        source_deadline = asyncio.get_running_loop().time() + cast(int, c["timeoutMs"]) / 1000
+        from .facts import (
+            CustomerSource,
+            lookup_customer_fact,
+            lookup_quickbooks_invoice_balance,
+            lookup_stripe_invoice_status,
+        )
+
+        base = unavailable_fact(source_id, c)
+        lookup = cast(str, base["lookupKey"])
+        if not lookup:
+            return base
         binding = next((b for b in bindings if b.source_version_id == source_id), None)
         if binding is None or asyncio.get_running_loop().time() >= min(deadline, source_deadline):
             return base
@@ -355,36 +362,28 @@ async def resolve_data(
             return base
 
     async def bounded_read(source_id: str, c: JSONObject) -> JSONObject:
-        async with semaphore:
-            return await with_deadline(read_one(source_id, c), cast(int, c["timeoutMs"]) / 1000)
+        try:
+            async with semaphore:
+                return await with_deadline(read_one(source_id, c), cast(int, c["timeoutMs"]) / 1000)
+        except Exception:
+            return unavailable_fact(source_id, c)
 
+    tasks = [asyncio.create_task(bounded_read(source_id, c)) for source_id, c in sources]
     try:
-        facts = await with_deadline(
-            asyncio.gather(*(bounded_read(source_id, c) for source_id, c in sources)), 10
-        )
-    except Exception:
-        facts = []
-        for source_id, c in sources:
-            lookup_value: JSONValue = body["arguments"]
-            for part in cast(list[str], cast(JSONObject, c["queryField"])["path"]):
-                lookup_value = lookup_value.get(part) if type(lookup_value) is dict else None
-            facts.append(
-                {
-                    "sourceVersionId": source_id,
-                    "lookup": c["lookup"],
-                    "lookupKey": lookup_value if type(lookup_value) is str else "",
-                    "authenticatedExecutor": True,
-                    "status": "unavailable",
-                    **(
-                        {
-                            "sourceIdentity": c["sourceIdentity"],
-                            "accountBoundary": c["accountBoundary"],
-                        }
-                        if c["formatVersion"] == 4
-                        else {"providerAccountId": c["providerAccountId"]}
-                    ),
-                }
-            )
+        # A failed source must not discard completed facts or leave queued reads
+        # running after the batch deadline. Preserve source order in signed input.
+        done, _ = await asyncio.wait(tasks, timeout=10) if tasks else (set(), set())
+        facts = [
+            task.result()
+            if task in done and not task.cancelled()
+            else unavailable_fact(source_id, c)
+            for task, (source_id, c) in zip(tasks, sources, strict=True)
+        ]
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                task.add_done_callback(_consume)
     from ._protocol import canonical
 
     body["factResolutions"] = cast(

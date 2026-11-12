@@ -11,6 +11,7 @@ from .types import AuthRailError, JSONObject, JSONValue, Phase
 
 MAX_CONTEXT = 128 * 1024
 MAX_VALUE = 64 * 1024
+MAX_EVALUATION_REQUEST = 512 * 1024
 
 
 def _string(value: str) -> str:
