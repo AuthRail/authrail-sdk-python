@@ -33,8 +33,8 @@ Enforce, saved approval continuations, reconciliation, custom Guard handlers
 and explicit fact readers. The [first-application guide](https://docs.authrail.io/docs/getting-started)
 uses this release with a simple Policy Rail and a local invoice reader.
 
-Some sections below also describe newer repository source. Automatic
-Rail-owned Contextual AI, expanded built-in Guards and automatic Data reader
+Some sections below also describe newer repository source. Execution checkpoints,
+automatic Rail-owned Contextual AI, expanded built-in Guards and automatic Data reader
 bindings are not part of SDK 0.1.1. Check
 [compatibility](https://docs.authrail.io/docs/compatibility) before enabling those
 requirements. The setup executable and native Runtime are version **0.2.0**,
@@ -267,9 +267,22 @@ or already-used request cannot start another callback.
 
 ### When the outcome is uncertain
 
+**Current source; not released in SDK 0.1.1:** pass an async application-owned save
+as `execution_checkpoint=save_recovery` to `enforce`, `resume_approval`,
+`resume_approval_from` or `recover_approval_from`. The SDK awaits this callback with
+an immutable `ExecutionContext` before reporting execution start. Persist
+`context.as_dict()` in protected storage; a failed save withholds both start and
+the business callback. The hook is specific to that call and does not change the
+shared client. The SDK does not select or write PostgreSQL, and this hook alone
+does not provide shared storage or worker integration.
+
 `EnforceOutcomeUnknownError` carries `recovery`, an `ExecutionContext`. A callback
 exception or cancellation does not prove a provider operation failed. Losing
-the completion acknowledgement also leaves the outcome uncertain.
+the completion acknowledgement also leaves the outcome uncertain. Current source
+also retains this recovery identity when the start acknowledgement is missing,
+invalid or replayed; the business callback stays stopped. Cancellation during the
+checkpoint propagates before start, while cancellation during start preserves
+the uncertain execution identity.
 
 Restore the saved context with `ExecutionContext.from_dict`. Query the provider
 using its original idempotency key and establish the real outcome. Then call

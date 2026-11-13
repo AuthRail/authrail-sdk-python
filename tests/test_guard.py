@@ -10,7 +10,7 @@ import httpx
 from test_enforce import ACTION, VERSION, Transport, client, operation
 
 from authrail import AuthRailError, EnforceBlockedError, GuardHandler
-from authrail._protocol import canonical
+from authrail._protocol import canonical, encode_input
 from authrail.guard import process_guard, registered_handlers
 
 BUNDLE = "00000000-0000-4000-8000-000000000030"
@@ -240,6 +240,7 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_both_boundaries_apply_and_receipts_use_processed_call(self):
         transport = Transport()
         checked = []
+        checkpoints = []
 
         def request(req):
             if req.method == "GET":
@@ -255,11 +256,22 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
 
         async with client(request, guard_handlers=[handler()]) as sdk:
 
+            async def checkpoint(context):
+                self.assertFalse(transport.started)
+                expected = hashlib.sha256(
+                    encode_input(checked[0], "tool_call").encode()
+                ).hexdigest()
+                self.assertEqual(context.input_sha256, expected)
+                checkpoints.append(context)
+
             async def execute(arguments, context):
                 self.assertEqual(arguments["message"], "[removed]")
+                self.assertEqual(checkpoints, [context])
                 return {"message": "response SECRET"}
 
-            result = await sdk.enforce(operation(), {"message": "SECRET"}, execute)
+            result = await sdk.enforce(
+                operation(), {"message": "SECRET"}, execute, execution_checkpoint=checkpoint
+            )
         self.assertEqual(result.result, {"message": "response [removed]"})
         self.assertEqual(checked[0]["arguments"]["message"], "[removed]")
         self.assertEqual(len(checked[1]["guardEvidence"]), 2)

@@ -14,6 +14,7 @@ from .enforce import (
     EnforceBlockedError,
     EnforceOutcomeUnknownError,
     EnforceResult,
+    ExecutionCheckpoint,
     ExecutionContext,
     ExecutionReceipt,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "EnforceBlockedError",
     "EnforceOutcomeUnknownError",
     "EnforceResult",
+    "ExecutionCheckpoint",
     "ExecutionContext",
     "ExecutionReceipt",
     "AsyncObserveClient",

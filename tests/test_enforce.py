@@ -232,21 +232,127 @@ class EnforceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(transport.requests), 1)
 
     async def test_lost_or_replayed_start_cannot_run_the_callback(self):
-        for start in [{"replayed": True}, {"state": "succeeded"}, {"receiptId": "invalid"}]:
+        for start in [
+            {"replayed": True},
+            {"state": "succeeded"},
+            {"receiptId": "invalid"},
+            {"replayed": None},
+            None,
+        ]:
             transport = Transport()
-            transport.start = start
+            transport.start = start or {}
+            transport.fail_start = start is None
+            checkpoints = []
             async with client(transport) as sdk:
 
                 async def forbidden(arguments, context):
                     self.fail("Unacknowledged start ran a callback")
 
-                with self.assertRaises(EnforceBlockedError):
-                    await sdk.enforce(operation(), {"amount": 80}, forbidden)
+                async def checkpoint(context, checkpoints=checkpoints):
+                    checkpoints.append(context)
+
+                with self.assertRaises(EnforceOutcomeUnknownError) as caught:
+                    await sdk.enforce(
+                        operation(), {"amount": 80}, forbidden, execution_checkpoint=checkpoint
+                    )
+            self.assertEqual(caught.exception.recovery, checkpoints[0])
+            sent = transport.requests[-1][1]
+            for field in [
+                "actionId",
+                "attemptId",
+                "permitId",
+                "inputSha256",
+                "providerIdempotencyKey",
+            ]:
+                self.assertEqual(caught.exception.recovery.as_dict()[field], sent[field])
+
+    async def test_checkpoint_persists_exact_recovery_before_start(self):
         transport = Transport()
-        transport.fail_start = True
+        checkpoints = []
         async with client(transport) as sdk:
-            with self.assertRaises(EnforceBlockedError):
-                await sdk.enforce(operation(), {"amount": 80}, forbidden)
+
+            async def checkpoint(context):
+                self.assertFalse(transport.started)
+                self.assertFalse(
+                    any(path == "/execution-receipts" for path, _ in transport.requests)
+                )
+                checkpoints.append(ExecutionContext.from_dict(context.as_dict()))
+
+            async def execute(arguments, context):
+                self.assertEqual(checkpoints, [context])
+                self.assertTrue(transport.started)
+                return {"status": "paid"}
+
+            result = await sdk.enforce(
+                operation(), {"amount": 80}, execute, execution_checkpoint=checkpoint
+            )
+            # A later call on the same client must not inherit this request's save hook.
+            with self.assertRaises(EnforceOutcomeUnknownError):
+                await sdk.enforce(operation(), {"amount": 80}, execute)
+        self.assertEqual(checkpoints, [result.execution])
+
+    async def test_checkpoint_failure_or_cancellation_withholds_start(self):
+        for failure in [RuntimeError("private storage failure"), asyncio.CancelledError()]:
+            transport = Transport()
+            async with client(transport) as sdk:
+
+                async def checkpoint(context, failure=failure):
+                    raise failure
+
+                async def forbidden(arguments, context):
+                    self.fail("Unpersisted request ran a callback")
+
+                expected = (
+                    asyncio.CancelledError
+                    if isinstance(failure, asyncio.CancelledError)
+                    else EnforceBlockedError
+                )
+                with self.assertRaises(expected):
+                    await sdk.enforce(
+                        operation(), {"amount": 80}, forbidden, execution_checkpoint=checkpoint
+                    )
+            self.assertFalse(transport.started)
+            self.assertFalse(any(path == "/execution-receipts" for path, _ in transport.requests))
+
+    async def test_cancellation_during_start_keeps_checkpoint_and_withholds_callback(self):
+        transport = Transport()
+        retained = asyncio.Event()
+        checkpoints = []
+
+        async def delayed(request):
+            response = transport(request)
+            if (
+                request.url.path == "/execution-receipts"
+                and json.loads(request.content)["event"] == "started"
+            ):
+                retained.set()
+                await asyncio.wait_for(asyncio.Event().wait(), timeout=2)
+            return response
+
+        async with client(delayed) as sdk:
+
+            async def checkpoint(context):
+                checkpoints.append(context)
+
+            async def forbidden(arguments, context):
+                self.fail("Cancelled start ran a callback")
+
+            task = asyncio.create_task(
+                sdk.enforce(operation(), {"amount": 80}, forbidden, execution_checkpoint=checkpoint)
+            )
+            try:
+                await asyncio.wait_for(retained.wait(), timeout=1)
+                task.cancel()
+                with self.assertRaises(EnforceOutcomeUnknownError) as caught:
+                    await task
+            finally:
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, EnforceOutcomeUnknownError):
+                    pass
+        self.assertEqual(caught.exception.recovery, checkpoints[0])
 
     async def test_execution_uses_checked_arguments_and_preserves_receipt_identity(self):
         transport = Transport()
@@ -343,18 +449,29 @@ class EnforceTests(unittest.IsolatedAsyncioTestCase):
         transport = Transport()
         continuation = await self.pending(transport)
         effects = []
+        checkpoints = []
         async with client(transport) as sdk:
 
+            async def checkpoint(context):
+                checkpoints.append(context)
+
             async def execute(arguments, context):
+                self.assertEqual(checkpoints[-1], context)
                 effects.append((arguments, context))
                 return {"status": "paid"}
 
-            result = await sdk.resume_approval_from(continuation, execute)
+            result = await sdk.resume_approval_from(
+                continuation, execute, execution_checkpoint=checkpoint
+            )
             self.assertEqual(result.execution.permit_id, PERMIT)
             self.assertEqual(result.execution.attempt_id, continuation.call.request_id)
             self.assertEqual(result.result_decision.outcome, "approval_required")
-            with self.assertRaises(EnforceBlockedError):
-                await sdk.recover_approval_from(continuation, execute)
+            with self.assertRaises(EnforceOutcomeUnknownError) as caught:
+                await sdk.recover_approval_from(
+                    continuation, execute, execution_checkpoint=checkpoint
+                )
+            self.assertEqual(caught.exception.recovery, result.execution)
+            self.assertEqual(checkpoints, [result.execution, result.execution])
         self.assertEqual(len(effects), 1)
         self.assertEqual(effects[0][0], {"amount": 80})
 
@@ -362,9 +479,15 @@ class EnforceTests(unittest.IsolatedAsyncioTestCase):
         transport = Transport()
         transport.need_approval = True
         effects = []
+        checkpoints = []
         async with client(transport) as sdk:
 
+            async def checkpoint(context):
+                self.assertFalse(transport.started)
+                checkpoints.append(context)
+
             async def execute(arguments, context):
+                self.assertEqual(checkpoints, [context])
                 effects.append(arguments["amount"])
                 return {"status": "paid"}
 
@@ -372,7 +495,7 @@ class EnforceTests(unittest.IsolatedAsyncioTestCase):
                 await sdk.enforce(operation(), {"amount": 80}, execute)
             blocked = caught.exception
             self.assertEqual(effects, [])
-            await sdk.resume_approval(blocked)
+            await sdk.resume_approval(blocked, execution_checkpoint=checkpoint)
             with self.assertRaises(EnforceBlockedError):
                 await sdk.resume_approval(blocked)
         self.assertEqual(effects, [80])
@@ -382,16 +505,25 @@ class EnforceTests(unittest.IsolatedAsyncioTestCase):
         continuation = await self.pending(transport)
         transport.lost_claim = True
         effects = []
+        checkpoints = []
         async with client(transport) as sdk:
 
+            async def checkpoint(context):
+                self.assertFalse(transport.started)
+                checkpoints.append(context)
+
             async def execute(arguments, context):
+                self.assertEqual(checkpoints, [context])
                 effects.append("paid")
                 return {"status": "paid"}
 
             with self.assertRaises(EnforceBlockedError):
                 await sdk.resume_approval_from(continuation, execute)
             self.assertEqual(effects, [])
-            await sdk.recover_approval_from(continuation, execute)
+            result = await sdk.recover_approval_from(
+                continuation, execute, execution_checkpoint=checkpoint
+            )
+            self.assertEqual(checkpoints, [result.execution])
         paths = [path for path, body in transport.requests]
         self.assertEqual(paths.count("/approval-permits/claim"), 1)
         self.assertEqual(paths.count("/approval-permits/recover"), 1)

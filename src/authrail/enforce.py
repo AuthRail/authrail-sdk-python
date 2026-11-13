@@ -160,7 +160,7 @@ class EnforceBlockedError(AuthRailError):
 
 
 class EnforceOutcomeUnknownError(AuthRailError):
-    """The callback or its completion acknowledgement failed; reconcile before retrying."""
+    """Execution ownership or outcome is uncertain; retain recovery and never retry blindly."""
 
     effect_may_have_occurred = True
 
@@ -190,6 +190,7 @@ class EnforceResult:
 
 
 Executor = Callable[[JSONObject, ExecutionContext], Awaitable[JSONObject]]
+ExecutionCheckpoint = Callable[[ExecutionContext], Awaitable[None]]
 
 
 def _permitted(decision: Decision) -> bool:
@@ -283,9 +284,15 @@ class AsyncEnforceClient:
         operation: Operation,
         arguments: JSONObject,
         execute: Executor,
+        *,
+        execution_checkpoint: ExecutionCheckpoint | None = None,
     ) -> EnforceResult:
         """Check the call, retain its start, invoke once, then check the returned result."""
-        if not callable(execute):
+        if (
+            not callable(execute)
+            or execution_checkpoint is not None
+            and not callable(execution_checkpoint)
+        ):
             raise AuthRailError("A protected async function is required")
         try:
             call = self._sidecar.prepare(operation, arguments)
@@ -315,7 +322,7 @@ class AsyncEnforceClient:
             if continuation is not None:
                 self._pending[blocked] = (continuation, execute)
             raise blocked
-        return await self._execute(call, decision, execute, None)
+        return await self._execute(call, decision, execute, None, execution_checkpoint)
 
     async def _process_guard(
         self,
@@ -343,12 +350,17 @@ class AsyncEnforceClient:
         ):
             raise AuthRailError("Guard configuration changed before evaluation")
 
-    async def resume_approval(self, blocked: EnforceBlockedError) -> EnforceResult:
+    async def resume_approval(
+        self,
+        blocked: EnforceBlockedError,
+        *,
+        execution_checkpoint: ExecutionCheckpoint | None = None,
+    ) -> EnforceResult:
         """Resume the original same-process callback after an exact one-use permit claim."""
         pending = self._pending.pop(blocked, None)
         if pending is None:
             raise EnforceBlockedError("tool_call", False, blocked.decision)
-        return await self.resume_approval_from(*pending)
+        return await self.resume_approval_from(*pending, execution_checkpoint=execution_checkpoint)
 
     def _restore(self, continuation: ApprovalContinuation) -> tuple[PreparedCall, Decision]:
         if (
@@ -408,17 +420,25 @@ class AsyncEnforceClient:
         self,
         continuation: ApprovalContinuation,
         execute: Executor,
+        *,
+        execution_checkpoint: ExecutionCheckpoint | None = None,
     ) -> EnforceResult:
         """Resume a protected persisted call; this does not restore or schedule an agent session."""
-        return await self._resume(continuation, execute, recover=False)
+        return await self._resume(
+            continuation, execute, recover=False, execution_checkpoint=execution_checkpoint
+        )
 
     async def recover_approval_from(
         self,
         continuation: ApprovalContinuation,
         execute: Executor,
+        *,
+        execution_checkpoint: ExecutionCheckpoint | None = None,
     ) -> EnforceResult:
         """Recover an existing unstarted permit after a lost claim response; never mint another."""
-        return await self._resume(continuation, execute, recover=True)
+        return await self._resume(
+            continuation, execute, recover=True, execution_checkpoint=execution_checkpoint
+        )
 
     async def _resume(
         self,
@@ -426,8 +446,13 @@ class AsyncEnforceClient:
         execute: Executor,
         *,
         recover: bool,
+        execution_checkpoint: ExecutionCheckpoint | None,
     ) -> EnforceResult:
-        if not callable(execute):
+        if (
+            not callable(execute)
+            or execution_checkpoint is not None
+            and not callable(execution_checkpoint)
+        ):
             raise AuthRailError("A protected async function is required")
         try:
             call, decision = self._restore(continuation)
@@ -462,7 +487,9 @@ class AsyncEnforceClient:
                 raise AuthRailError("Approval permit expired")
         except Exception:
             raise EnforceBlockedError("tool_call", False) from None
-        return await self._execute(call, decision, execute, cast(str, permit["permitId"]))
+        return await self._execute(
+            call, decision, execute, cast(str, permit["permitId"]), execution_checkpoint
+        )
 
     async def report_execution(
         self,
@@ -537,6 +564,7 @@ class AsyncEnforceClient:
         decision: Decision,
         execute: Executor,
         permit_id: str | None,
+        execution_checkpoint: ExecutionCheckpoint | None,
     ) -> EnforceResult:
         if not _matches(_UUID, decision.action_id):
             raise EnforceBlockedError("tool_call", False, decision)
@@ -548,13 +576,19 @@ class AsyncEnforceClient:
             f"ar-{decision.action_id}",
             call.traceparent,
         )
+        # Retain recovery before start can commit, without changing the shared client.
+        if execution_checkpoint is not None:
+            try:
+                await execution_checkpoint(context)
+            except Exception:
+                raise EnforceBlockedError("tool_call", False, decision) from None
         try:
             started = await self.report_execution(context, "started")
             if started.state != "executing" or started.replayed:
                 raise AuthRailError("Execution start was not fresh")
-        except Exception:
-            # An unknown start acknowledgement is never permission to call the provider.
-            raise EnforceBlockedError("tool_call", False, decision) from None
+        except (Exception, asyncio.CancelledError):
+            # A missing or replayed start may describe retained work owned by an earlier call.
+            raise EnforceOutcomeUnknownError(context, decision) from None
         try:
             result = await execute(cast(JSONObject, call.as_dict()["arguments"]), context)
         except (Exception, asyncio.CancelledError):
