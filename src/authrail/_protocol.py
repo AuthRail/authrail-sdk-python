@@ -198,3 +198,19 @@ def encode_input(call: JSONObject, phase: Phase, result: object = None) -> str:
     if call.get("guardEvidence"):
         entries.append('"guardEvidence":' + canonical(call["guardEvidence"]))
     return "{" + ",".join(entries) + "}"
+
+
+class ConfigurationChangedError(Exception):
+    """A preparation changed before the sidecar retained a decision."""
+
+
+def valid_provider_reference(value: object) -> bool:
+    """Opaque evidence only, never a URL or execution target."""
+    if type(value) is not str or not value or value.strip() != value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= 4000 and not any(
+            ord(c) < 32 or ord(c) == 127 for c in value
+        )
+    except UnicodeEncodeError:
+        return False

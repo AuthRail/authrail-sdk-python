@@ -16,11 +16,13 @@ from test_observe import LegacySidecarTransport
 from authrail import (
     ApprovalContinuation,
     AsyncEnforceClient,
+    AuthRailError,
     EnforceBlockedError,
     EnforceOutcomeUnknownError,
     ExecutionContext,
     Operation,
 )
+from authrail._protocol import canonical
 
 ORG = "00000000-0000-4000-8000-000000000001"
 DEPLOYMENT = "00000000-0000-4000-8000-000000000002"
@@ -66,7 +68,7 @@ class Transport:
         statement.update({key: body[key] for key in fields})
         statement.update({key: proof[key] for key in ["issuedAt", "expiresAt"]})
         signature = base64.urlsafe_b64decode(proof["signature"] + "==")
-        KEY.public_key().verify(signature, json.dumps(statement, separators=(",", ":")).encode())
+        KEY.public_key().verify(signature, canonical(statement, ordered=True).encode())
 
     def __call__(self, request):
         if request.method == "GET" and request.url.path == "/guard-requirements":
@@ -562,3 +564,99 @@ class EnforceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(EnforceOutcomeUnknownError):
                 await task
         self.assertEqual(transport.requests[-1][1]["event"], "unknown")
+
+    async def test_configuration_renewal_retries_only_preparation_and_effect_once(self):
+        class Renewing(Transport):
+            def __init__(self):
+                super().__init__()
+                self.sequence = 1
+                self.checks = {"tool_call": 0, "tool_result": 0}
+
+            def __call__(self, request):
+                response = super().__call__(request)
+                if request.url.path == "/guard-requirements":
+                    data = response.json()
+                    data["sequence"] = self.sequence
+                    return httpx.Response(200, json=data)
+                if request.url.path == "/evaluate":
+                    body = json.loads(request.content)
+                    assert body["expectedBundle"] == {"bundleId": BUNDLE, "sequence": self.sequence}
+                    self.checks[body["phase"]] += 1
+                    if self.checks[body["phase"]] == 1:
+                        self.sequence += 1
+                        return httpx.Response(409, json={"code": "configuration_changed"})
+                    data = response.json()
+                    data["sequence"] = self.sequence
+                    return httpx.Response(200, json=data)
+                return response
+
+        transport = Renewing()
+        effects = []
+        async with client(transport) as sdk:
+
+            async def execute(arguments, context):
+                effects.append(arguments)
+                return {"status": "paid"}
+
+            result = await sdk.enforce(operation(), {"amount": 80}, execute)
+        self.assertEqual(result.result, {"status": "paid"})
+        self.assertEqual(transport.checks, {"tool_call": 2, "tool_result": 2})
+        self.assertEqual(effects, [{"amount": 80}])
+
+    async def test_stale_approval_status_refresh_has_new_attempt_and_no_vote_transfer(self):
+        class Stale(Transport):
+            def __init__(self):
+                super().__init__()
+                self.need_approval = True
+                self.checks = []
+
+            def __call__(self, request):
+                if request.url.path == "/approval-permits/status":
+                    body = json.loads(request.content)
+                    self.verify_proof(
+                        body,
+                        "authrail.approval.status.v1",
+                        ["approvalRequestId", "actionId", "inputSha256", "keySha256"],
+                    )
+                    return httpx.Response(
+                        200,
+                        json={
+                            "actionId": ACTION,
+                            "approvalRequestId": APPROVAL,
+                            "state": "permit_issued",
+                            "requiresRefresh": True,
+                            "expiresAt": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+                        },
+                    )
+                response = super().__call__(request)
+                if request.url.path == "/evaluate":
+                    self.checks.append(json.loads(request.content))
+                return response
+
+        transport = Stale()
+        continuation = await self.pending(transport)
+        async with client(transport) as sdk:
+            state = await sdk.approval_status(continuation)
+            self.assertTrue(state.requires_refresh)
+            self.assertEqual(state.state, "permit_issued")
+
+            async def forbidden(arguments, context):
+                self.fail("Stale votes authorized an effect")
+
+            with self.assertRaises(EnforceBlockedError) as fresh:
+                await sdk.refresh_approval_from(continuation, forbidden)
+            self.assertIsNotNone(fresh.exception.approval_continuation)
+        self.assertNotEqual(transport.checks[0]["requestId"], transport.checks[1]["requestId"])
+        self.assertEqual(transport.checks[0]["arguments"], transport.checks[1]["arguments"])
+        self.assertFalse(transport.started)
+
+    async def test_reconcile_accepts_signed_opaque_references_and_rejects_invalid_bytes(self):
+        transport = Transport()
+        recovery = ExecutionContext(ACTION, VERSION, None, "a" * 64, "ar-" + ACTION)
+        async with client(transport) as sdk:
+            for reference in ["projects/acme/jobs/1?x=a&b=<value>", "é" * 2000]:
+                await sdk.reconcile(recovery, "succeeded", reference)
+            for reference in [" bad", "bad\nref", "bad\x7fref", "é" * 2001]:
+                with self.assertRaises(AuthRailError):
+                    await sdk.reconcile(recovery, "succeeded", reference)
+        self.assertEqual(len(transport.requests), 2)

@@ -10,6 +10,7 @@ from .contextual import (
 from .discovery import discover
 from .enforce import (
     ApprovalContinuation,
+    ApprovalStatus,
     AsyncEnforceClient,
     EnforceBlockedError,
     EnforceOutcomeUnknownError,
@@ -61,6 +62,7 @@ __all__ = [
     "lookup_quickbooks_invoice_balance",
     "new_customer_api_reader",
     "ApprovalContinuation",
+    "ApprovalStatus",
     "AsyncEnforceClient",
     "EnforceBlockedError",
     "EnforceOutcomeUnknownError",

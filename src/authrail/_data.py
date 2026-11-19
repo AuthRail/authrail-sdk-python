@@ -188,6 +188,7 @@ async def resolve_data(
     bindings: tuple[DataSourceBinding, ...] | None,
     call: PreparedCall,
     phase: Phase,
+    refresh_retained: bool = False,
 ) -> tuple[PreparedCall, str | None, int | None]:
     if bindings is None:
         return call, None, None
@@ -237,7 +238,11 @@ async def resolve_data(
     ids = [source_id for source_id, _ in sources]
     if len(set(ids)) != len(ids):
         _invalid()
-    manual = cast(list[JSONObject], body.get("factResolutions", []))
+    manual = [
+        fact
+        for fact in cast(list[JSONObject], body.get("factResolutions", []))
+        if not (refresh_retained and fact.get("sourceVersionId") in ids)
+    ]
     manual_ids = [str(fact.get("sourceVersionId")) for fact in manual]
     if len(set(manual_ids)) != len(manual_ids) or (
         phase == "tool_call" and set(ids).intersection(manual_ids)

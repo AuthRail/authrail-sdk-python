@@ -25,10 +25,12 @@ from ._protocol import (
     MAX_CONTEXT,
     MAX_EVALUATION_REQUEST,
     MAX_VALUE,
+    ConfigurationChangedError,
     canonical,
     encode_input,
     parse_object,
     snapshot,
+    valid_provider_reference,
 )
 from .types import (
     AuthRailError,
@@ -70,7 +72,7 @@ class AsyncObserveClient:
             url = urlsplit(sidecar_url)
             port = url.port
             valid = (
-                url.scheme == "http"
+                url.scheme in ("http", "https")
                 and url.hostname in ("127.0.0.1", "::1")
                 and url.username is None
                 and url.password is None
@@ -239,14 +241,35 @@ class AsyncObserveClient:
         phase: Phase,
         expected_mode: str,
         result: object = None,
+        expected_bundle: JSONObject | None = None,
+        refresh_retained_facts: bool = False,
     ) -> Decision:
         if phase not in ("tool_call", "tool_result"):
             raise AuthRailError("Invalid evaluation phase")
         original_call = call
         call, data_bundle, data_sequence = await resolve_data(
-            self._http, self._endpoint, self._token, self._data_sources, call, phase
+            self._http,
+            self._endpoint,
+            self._token,
+            self._data_sources,
+            call,
+            phase,
+            refresh_retained_facts,
         )
+        if (
+            expected_bundle
+            and data_bundle
+            and (
+                expected_bundle["bundleId"] != data_bundle
+                or expected_bundle["sequence"] != data_sequence
+            )
+        ):
+            raise ConfigurationChangedError()
+        if expected_bundle is None and data_bundle:
+            expected_bundle = {"bundleId": data_bundle, "sequence": data_sequence}
         body = call.as_dict()
+        if expected_bundle:
+            body["expectedBundle"] = expected_bundle
         if body.get("reviewSummary") is not None and expected_mode != "enforce":
             raise AuthRailError("Review summary requires Enforce")
         findings = await read_contextual(
@@ -259,6 +282,7 @@ class AsyncObserveClient:
             call=call,
             phase=phase,
             result=result,
+            expected_bundle=expected_bundle,
         )
         if findings:
             body["contextualFindings"] = findings
@@ -368,10 +392,16 @@ class AsyncObserveClient:
                     headers=headers,
                     content=snapshot(
                         body, MAX_EVALUATION_REQUEST if path == "/evaluate" else MAX_CONTEXT
-                    ) if body is not None else None,
+                    )
+                    if body is not None
+                    else None,
                     timeout=deadline_seconds,
                 ) as response,
             ):
+                if path == "/evaluate" and response.status_code == 409:
+                    conflict = await response_object(response, 128)
+                    if conflict == {"code": "configuration_changed"}:
+                        raise ConfigurationChangedError()
                 if response.status_code != status:
                     raise AuthRailError(f"Sidecar returned HTTP {response.status_code}")
                 data = bytearray()
@@ -410,7 +440,7 @@ class AsyncObserveClient:
             event
             not in ("succeeded", "failed", "unknown", "reconciled_succeeded", "reconciled_failed")
             or not _matches(_REF, provider_idempotency_key)
-            or (provider_reference is not None and not _matches(_REF, provider_reference))
+            or (provider_reference is not None and not valid_provider_reference(provider_reference))
             or (event.startswith("reconciled_") and provider_reference is None)
             or not _matches(_UUID, call.request_id)
             or not _matches(_REF, call.action_key)

@@ -13,15 +13,23 @@ from datetime import datetime
 from types import TracebackType
 from typing import Literal, cast
 from urllib.parse import urlencode
+from uuid import uuid4
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ._data import DataSourceBinding
-from ._protocol import MAX_VALUE, encode_input, parse_object, snapshot
+from ._protocol import (
+    MAX_VALUE,
+    ConfigurationChangedError,
+    encode_input,
+    parse_object,
+    snapshot,
+    valid_provider_reference,
+)
 from .guard import GuardHandler, GuardProcessing, process_guard, registered_handlers
 from .observe import _REF, _UUID, AsyncObserveClient, _matches
-from .types import AuthRailError, Decision, JSONObject, JSONValue, Operation, Phase, PreparedCall
+from .types import AuthRailError, Decision, JSONObject, Operation, Phase, PreparedCall
 
 ExecutionEvent = Literal[
     "started", "succeeded", "failed", "unknown", "reconciled_succeeded", "reconciled_failed"
@@ -75,6 +83,17 @@ class ExecutionContext:
 
 
 @dataclass(frozen=True)
+class ApprovalStatus:
+    """Durable review state and whether its facts/permission need refreshing."""
+
+    action_id: str
+    approval_request_id: str
+    state: str
+    requires_refresh: bool
+    expires_at: str
+
+
+@dataclass(frozen=True)
 class ApprovalContinuation:
     """Exact waiting call and decision; encrypt and tenant-scope this application-owned state."""
 
@@ -82,6 +101,7 @@ class ApprovalContinuation:
     deployment_id: str
     call: PreparedCall = field(repr=False)
     decision: Decision = field(repr=False)
+    original_arguments: bytes | None = field(default=None, repr=False)
 
     def as_dict(self) -> JSONObject:
         return {
@@ -92,6 +112,11 @@ class ApprovalContinuation:
             "traceparent": self.call.traceparent,
             "call": self.call.as_dict(),
             "decision": self.decision.as_dict(),
+            **(
+                {"originalArguments": parse_object(self.original_arguments)}
+                if self.original_arguments is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -99,7 +124,7 @@ class ApprovalContinuation:
         """Restore saved state; permission is still verified when the SDK claims a permit."""
         data = parse_object(snapshot(value, 256 * 1024))
         if (
-            set(data)
+            set(data) - {"originalArguments"}
             != {
                 "formatVersion",
                 "organisationId",
@@ -138,7 +163,13 @@ class ApprovalContinuation:
             snapshot(decision_data),
         )
         return cls(
-            cast(str, data["organisationId"]), cast(str, data["deploymentId"]), call, decision
+            cast(str, data["organisationId"]),
+            cast(str, data["deploymentId"]),
+            call,
+            decision,
+            snapshot(cast(JSONObject, data["originalArguments"]))
+            if "originalArguments" in data
+            else None,
         )
 
 
@@ -296,25 +327,15 @@ class AsyncEnforceClient:
             raise AuthRailError("A protected async function is required")
         try:
             call = self._sidecar.prepare(operation, arguments)
-            guard = None
-            if self._guard_processing:
-                guard = await self._process_guard(
-                    call, "tool_call", cast(JSONObject, call.as_dict()["arguments"])
-                )
-                data = call.as_dict()
-                data["arguments"] = guard.output
-                data["guardEvidence"] = guard.evidence
-                call = PreparedCall(
-                    call.request_id, call.action_key, call.traceparent, snapshot(data)
-                )
-            decision = await self._sidecar._evaluate(call, "tool_call", "enforce")
-            call = self._sidecar._data_calls.get(call, call)
-            self._check_guard_bundle(guard, decision)
+            original_arguments = snapshot(cast(JSONObject, call.as_dict()["arguments"]))
+            call, decision = await self._check_call(call, parse_object(original_arguments))
         except Exception:
             raise EnforceBlockedError("tool_call", False) from None
         if not _permitted(decision):
             continuation = (
-                ApprovalContinuation(self._organisation_id, self._deployment_id, call, decision)
+                ApprovalContinuation(
+                    self._organisation_id, self._deployment_id, call, decision, original_arguments
+                )
                 if _approval(decision)
                 else None
             )
@@ -322,7 +343,9 @@ class AsyncEnforceClient:
             if continuation is not None:
                 self._pending[blocked] = (continuation, execute)
             raise blocked
-        return await self._execute(call, decision, execute, None, execution_checkpoint)
+        return await self._execute(
+            call, decision, execute, None, execution_checkpoint, original_arguments
+        )
 
     async def _process_guard(
         self,
@@ -488,8 +511,138 @@ class AsyncEnforceClient:
         except Exception:
             raise EnforceBlockedError("tool_call", False) from None
         return await self._execute(
-            call, decision, execute, cast(str, permit["permitId"]), execution_checkpoint
+            call,
+            decision,
+            execute,
+            cast(str, permit["permitId"]),
+            execution_checkpoint,
+            continuation.original_arguments,
         )
+
+    async def approval_status(self, continuation: ApprovalContinuation) -> ApprovalStatus:
+        """Read durable waiting and freshness without claiming execution permission."""
+        call, decision = self._restore(continuation)
+        fields: JSONObject = {
+            "approvalRequestId": decision.as_dict()["approvalRequestId"],
+            "actionId": decision.action_id,
+            "inputSha256": hashlib.sha256(
+                encode_input(call.as_dict(), "tool_call").encode()
+            ).hexdigest(),
+            "keySha256": self._sidecar._key_sha256(),
+        }
+        value = await self._sidecar._request_json(
+            "/approval-permits/status",
+            {
+                **fields,
+                "proof": self._sidecar._sign_statement("authrail.approval.status.v1", fields),
+            },
+            status=200,
+            deadline_seconds=3.0,
+            traceparent=call.traceparent,
+        )
+        expiry = value.get("expiresAt")
+        if (
+            set(value) != {"actionId", "approvalRequestId", "state", "requiresRefresh", "expiresAt"}
+            or value["actionId"] != decision.action_id
+            or value["approvalRequestId"] != fields["approvalRequestId"]
+            or value["state"]
+            not in (
+                "pending",
+                "approved",
+                "rejected",
+                "cancelled",
+                "expired",
+                "consumed",
+                "superseded",
+                "permit_issued",
+            )
+            or type(value["requiresRefresh"]) is not bool
+            or type(expiry) is not str
+        ):
+            raise AuthRailError("Invalid approval status")
+        deadline = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+        if deadline.tzinfo is None:
+            raise AuthRailError("Invalid approval freshness deadline")
+        return ApprovalStatus(
+            cast(str, value["actionId"]),
+            cast(str, value["approvalRequestId"]),
+            cast(str, value["state"]),
+            value["requiresRefresh"],
+            expiry,
+        )
+
+    async def _check_call(
+        self, base: PreparedCall, original: JSONObject, expected_arguments: JSONObject | None = None
+    ) -> tuple[PreparedCall, Decision]:
+        for attempt in range(2):
+            try:
+                guard = await self._process_guard(base, "tool_call", original)
+                if expected_arguments is not None and snapshot(guard.output) != snapshot(
+                    expected_arguments
+                ):
+                    raise AuthRailError("Fresh processing changed the business input")
+                data = base.as_dict()
+                data["arguments"], data["guardEvidence"] = guard.output, guard.evidence
+                call = PreparedCall(
+                    base.request_id, base.action_key, base.traceparent, snapshot(data)
+                )
+                decision = await self._sidecar._evaluate(
+                    call,
+                    "tool_call",
+                    "enforce",
+                    expected_bundle={"bundleId": guard.bundle_id, "sequence": guard.sequence},
+                    refresh_retained_facts=expected_arguments is not None,
+                )
+                call = self._sidecar._data_calls.get(call, call)
+                self._check_guard_bundle(guard, decision)
+                return call, decision
+            except ConfigurationChangedError:
+                if attempt:
+                    raise
+        raise AuthRailError("Configuration changed repeatedly")
+
+    async def refresh_approval_from(
+        self,
+        continuation: ApprovalContinuation,
+        execute: Executor,
+        *,
+        execution_checkpoint: ExecutionCheckpoint | None = None,
+        fact_resolutions: Sequence[JSONObject] | None = None,
+        trajectory: JSONObject | None = None,
+    ) -> EnforceResult:
+        """Refresh stale unstarted review; prior votes never approve the fresh decision."""
+        status = await self.approval_status(continuation)
+        if not status.requires_refresh or status.state not in (
+            "pending",
+            "approved",
+            "permit_issued",
+        ):
+            raise EnforceBlockedError("tool_call", False, continuation.decision)
+        call, _ = self._restore(continuation)
+        data = call.as_dict()
+        if continuation.original_arguments is None and data.get("guardEvidence"):
+            raise AuthRailError("Original input is required for fresh Guard processing")
+        original = continuation.original_arguments or snapshot(cast(JSONObject, data["arguments"]))
+        request_id = str(uuid4())
+        data["requestId"] = request_id
+        if fact_resolutions is not None:
+            data["factResolutions"] = list(fact_resolutions)
+        if trajectory is not None:
+            data["trajectory"] = trajectory
+        base = PreparedCall(request_id, call.action_key, call.traceparent, snapshot(data))
+        call, decision = await self._check_call(
+            base, parse_object(original), cast(JSONObject, data["arguments"])
+        )
+        if not _permitted(decision):
+            fresh = (
+                ApprovalContinuation(
+                    self._organisation_id, self._deployment_id, call, decision, original
+                )
+                if _approval(decision)
+                else None
+            )
+            raise EnforceBlockedError("tool_call", False, decision, fresh)
+        return await self._execute(call, decision, execute, None, execution_checkpoint, original)
 
     async def report_execution(
         self,
@@ -509,7 +662,7 @@ class AsyncEnforceClient:
                 "reconciled_succeeded",
                 "reconciled_failed",
             )
-            or (provider_reference is not None and not _matches(_REF, provider_reference))
+            or (provider_reference is not None and not valid_provider_reference(provider_reference))
             or (event.startswith("reconciled_") and provider_reference is None)
         ):
             raise AuthRailError("Invalid execution report")
@@ -565,6 +718,7 @@ class AsyncEnforceClient:
         execute: Executor,
         permit_id: str | None,
         execution_checkpoint: ExecutionCheckpoint | None,
+        original_arguments: bytes | None = None,
     ) -> EnforceResult:
         if not _matches(_UUID, decision.action_id):
             raise EnforceBlockedError("tool_call", False, decision)
@@ -613,21 +767,53 @@ class AsyncEnforceClient:
             raise EnforceBlockedError("tool_result", True)
         result = parse_object(result_bytes)
         try:
-            result_call = call
-            guard = None
-            if self._guard_processing:
-                guard = await self._process_guard(call, "tool_result", result)
-                data = call.as_dict()
-                evidence = cast(list[JSONValue], data.get("guardEvidence", [])) + guard.evidence
-                if len(evidence) > 128:
-                    raise AuthRailError("Too much Guard processing evidence")
-                data["guardEvidence"] = evidence
-                result_call = PreparedCall(
-                    call.request_id, call.action_key, call.traceparent, snapshot(data)
-                )
-                result = guard.output
-            checked = await self._sidecar._evaluate(result_call, "tool_result", "enforce", result)
-            self._check_guard_bundle(guard, checked)
+            for attempt in range(2):
+                try:
+                    data = call.as_dict()
+                    guard = await self._process_guard(
+                        call, "tool_result", parse_object(result_bytes)
+                    )
+                    if original_arguments is not None and (
+                        guard.bundle_id != decision.as_dict().get("bundleId")
+                        or guard.sequence != decision.as_dict().get("sequence")
+                    ):
+                        fresh_call = await self._process_guard(
+                            call, "tool_call", parse_object(original_arguments)
+                        )
+                        if (
+                            fresh_call.bundle_id != guard.bundle_id
+                            or fresh_call.sequence != guard.sequence
+                        ):
+                            raise ConfigurationChangedError()
+                        if snapshot(fresh_call.output) != snapshot(
+                            cast(JSONObject, data["arguments"])
+                        ):
+                            raise AuthRailError("Current processing changed executed input")
+                        data["guardEvidence"] = fresh_call.evidence
+                    evidence = [
+                        item
+                        for item in cast(list[JSONObject], data.get("guardEvidence", []))
+                        if item.get("phase") == "tool_call"
+                    ] + guard.evidence
+                    if len(evidence) > 128:
+                        raise AuthRailError("Too much Guard processing evidence")
+                    data["guardEvidence"] = evidence
+                    result_call = PreparedCall(
+                        call.request_id, call.action_key, call.traceparent, snapshot(data)
+                    )
+                    checked = await self._sidecar._evaluate(
+                        result_call,
+                        "tool_result",
+                        "enforce",
+                        guard.output,
+                        expected_bundle={"bundleId": guard.bundle_id, "sequence": guard.sequence},
+                    )
+                    self._check_guard_bundle(guard, checked)
+                    result = guard.output
+                    break
+                except ConfigurationChangedError:
+                    if attempt:
+                        raise
         except (Exception, asyncio.CancelledError):
             raise EnforceBlockedError("tool_result", True) from None
         checked_value = checked.as_dict()

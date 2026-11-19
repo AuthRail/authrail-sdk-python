@@ -76,7 +76,7 @@ accepting a different question, model, threshold or output shape.
 
 ## Transport and verification
 
-Local clients accept literal loopback HTTP origins only, ignore environment
+Local clients accept literal loopback HTTP/HTTPS origins only, ignore environment
 proxies and do not follow redirects. Provider helpers use fixed reviewed HTTPS
 destinations and bounded responses. Safe errors omit credentials, source text and
 raw provider bodies. Discovery keys resolve setup identity only.
@@ -87,3 +87,20 @@ Go helper exercises the real sidecar handler with disposable signed rules and
 state, including queued reporting. It does not stand in for tenant-backed
 approval/payment E2E or independent provider verification. Package publication,
 supported-version runtime checks and founder acceptance remain separate gates.
+
+## Fresh preparation and durable waiting
+
+The customer application retains an exact checked call, private original arguments
+and a separate execution recovery identity. A denial-only `expectedBundle`
+selection is sent to the local sidecar. Only its typed pre-retention configuration
+conflict permits one fresh preparation from original input. It never permits
+repeating execution start or the business callback. Result preparation may retry
+under the same restriction after an effect, with exact executed-input comparison
+before refreshed contextual disclosure.
+
+Approval status separates durable state from freshness. Explicit refresh keeps
+business identity, replaces applicable automatic facts, uses a new attempt and
+retains a new exact review. Older votes and expired permits do not grant that
+new request. Standard claim/recovery remains bound to the original checked input.
+The matching sidecar source contract is required; released version compatibility
+is documented separately in the README.

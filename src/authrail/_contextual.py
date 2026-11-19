@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ._http import response_object
-from ._protocol import canonical, encode_input, snapshot
+from ._protocol import ConfigurationChangedError, canonical, encode_input, snapshot
 from .types import AuthRailError, JSONObject, JSONValue, Phase, PreparedCall
 
 _UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
@@ -120,6 +120,7 @@ async def read_contextual(
     call: PreparedCall,
     phase: Phase,
     result: object,
+    expected_bundle: JSONObject | None = None,
 ) -> list[JSONValue]:
     """A missing finding stays missing; this integration never fabricates a rule answer."""
     body = call.as_dict()
@@ -155,6 +156,11 @@ async def read_contextual(
         return []
     if plan.get("coverage") != "evaluated" or not _identifier(plan.get("bundleId"), _UUID):
         raise AuthRailError("Invalid contextual requirements")
+    if expected_bundle and (
+        plan.get("bundleId") != expected_bundle["bundleId"]
+        or plan.get("sequence") != expected_bundle["sequence"]
+    ):
+        raise ConfigurationChangedError()
     if plan.get("disclosureProcessing") is True and not _disclosure_processed(
         plan, body, phase, result
     ):
