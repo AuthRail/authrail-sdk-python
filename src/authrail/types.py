@@ -16,6 +16,24 @@ class AuthRailError(Exception):
     """A safe configuration, protocol or availability error without customer payloads."""
 
 
+@dataclass(frozen=True)
+class TrajectorySession:
+    """One active sidecar generation; call and result reuse the same hook sequence."""
+
+    principal_id: str
+    session_id: str
+    generation: int
+    next_sequence: int
+
+
+@dataclass(frozen=True)
+class TrajectoryMigration:
+    """Result of an explicit, deployment-local legacy protocol migration."""
+
+    legacy_disabled: bool
+    retired_legacy_sessions: int
+
+
 @dataclass(frozen=True, kw_only=True)
 class Operation:
     """One reviewed action bound to application-authenticated caller and resource IDs."""

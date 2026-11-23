@@ -41,9 +41,13 @@ from .types import (
     ObserveRun,
     Operation,
     PreparedCall,
+    TrajectoryMigration,
+    TrajectorySession,
 )
 
 __all__ = [
+    "TrajectoryMigration",
+    "TrajectorySession",
     "DataResourceContext",
     "DataSourceBinding",
     "GuardHandler",

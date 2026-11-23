@@ -392,6 +392,30 @@ no business effects. Late answers are rejected. Custom readers and handlers
 must still cooperate with cancellation; the SDK cannot terminate arbitrary
 application code or a running thread.
 
+## Managed session lifecycle in source
+
+`admit_trajectory_session(principal_id, session_id)` returns a sidecar-owned session generation and
+`next_sequence`. Put the returned generation and `next_sequence` in trajectory fields `generation`
+and `sequence` for one exact call/result pair. Both fields are included in the signed input.
+Admission inspects an already-active identity, so a lost reply does not require
+inventing a generation. It does not reserve the next sequence: applications must
+coordinate concurrent preparation for the same session and re-admit to inspect
+its durable next sequence after interruption.
+
+`retire_trajectory_session(session)` ends only that exact generation. The same session
+name may then receive a newer generation; old hooks and stale retirement requests
+cannot close or reopen it. Completed read hooks compact into ordered verified
+history and the latest completed replay checkpoint. Older compacted sequences
+are denied. Keep outstanding business recovery with the existing Action/attempt
+records; retirement does not acknowledge queued evidence or resolve unknown effects.
+
+`migrate_legacy_trajectory_sessions()` explicitly disables legacy session admission and
+retires legacy trajectory histories together. Ordinary admission/retirement never
+invokes migration automatically. Legacy examples below remain compatible until
+that deliberate deployment-local change. Sessions live in the owning sidecar's
+private journal; this is not shared replica state. These methods require matching
+source SDK/sidecar releases and are unavailable in older published artifacts.
+
 ## Record execution and session history explicitly
 
 An Observe decision does not establish what the application did. If your

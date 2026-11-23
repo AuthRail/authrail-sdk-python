@@ -91,6 +91,39 @@
         }
       ],
       "canonicalInput": "{\"arguments\":{\"message\":\"\\u003csafe\\u003e\"},\"guardEvidence\":[{\"bundleId\":\"00000000-0000-4000-8000-000000000001\",\"handlerId\":\"redact\",\"handlerVersion\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"inputSha256\":\"24ed65044b6346a4e6fa04ef1f480bc8ff128f36eeafa6ab5d1ab3804997d28f\",\"kind\":\"sanitize\",\"outputSha256\":\"1a1bda07bd3f1bacb01beac684dff257574a6e8366a49d9e50ab8f60459032cb\",\"phase\":\"tool_call\",\"target\":{\"path\":[\"message\"],\"root\":\"arguments\"}}]}"
+    },
+    {
+      "name": "managed trajectory tool_call",
+      "phase": "tool_call",
+      "arguments": {
+        "amount": 50
+      },
+      "trajectory": {
+        "sessionId": "task_123",
+        "generation": 7,
+        "sequence": 3,
+        "complete": true,
+        "priorReadOperationVersionIds": []
+      },
+      "canonicalInput": "{\"arguments\":{\"amount\":50},\"trajectory\":{\"sessionId\":\"task_123\",\"generation\":7,\"sequence\":3,\"complete\":true,\"priorReadOperationVersionIds\":[]}}"
+    },
+    {
+      "name": "managed trajectory tool_result",
+      "phase": "tool_result",
+      "arguments": {
+        "amount": 50
+      },
+      "trajectory": {
+        "sessionId": "task_123",
+        "generation": 7,
+        "sequence": 3,
+        "complete": true,
+        "priorReadOperationVersionIds": []
+      },
+      "result": {
+        "status": "found"
+      },
+      "canonicalInput": "{\"arguments\":{\"amount\":50},\"result\":{\"status\":\"found\"},\"trajectory\":{\"sessionId\":\"task_123\",\"generation\":7,\"sequence\":3,\"complete\":true,\"priorReadOperationVersionIds\":[]}}"
     }
   ]
 }

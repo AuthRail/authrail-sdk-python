@@ -13,6 +13,7 @@ import httpx
 
 from ._async import _consume, with_deadline
 from ._http import response_object, valid_secret
+from ._protocol import ConfigurationChangedError
 from .types import AuthRailError, JSONObject, JSONValue, Phase, PreparedCall
 
 if TYPE_CHECKING:
@@ -189,9 +190,10 @@ async def resolve_data(
     call: PreparedCall,
     phase: Phase,
     refresh_retained: bool = False,
-) -> tuple[PreparedCall, str | None, int | None]:
+    expected_bundle: JSONObject | None = None,
+) -> tuple[PreparedCall, str | None, int | None, bool]:
     if bindings is None:
-        return call, None, None
+        return call, None, None, False
     body = call.as_dict()
     headers = {"Authorization": "Bearer " + token}
     if call.traceparent:
@@ -238,16 +240,30 @@ async def resolve_data(
     ids = [source_id for source_id, _ in sources]
     if len(set(ids)) != len(ids):
         _invalid()
+    # A changed plan cannot authorize trusted resource or credential reads under old processing.
+    if expected_bundle and (
+        plan["bundleId"] != expected_bundle["bundleId"]
+        or plan["sequence"] != expected_bundle["sequence"]
+    ):
+        raise ConfigurationChangedError()
+    managed_ids = set(ids).intersection(binding.source_version_id for binding in bindings)
     manual = [
         fact
         for fact in cast(list[JSONObject], body.get("factResolutions", []))
-        if not (refresh_retained and fact.get("sourceVersionId") in ids)
+        if not (refresh_retained and fact.get("sourceVersionId") in managed_ids)
     ]
     manual_ids = [str(fact.get("sourceVersionId")) for fact in manual]
     if len(set(manual_ids)) != len(manual_ids) or (
-        phase == "tool_call" and set(ids).intersection(manual_ids)
+        phase == "tool_call" and managed_ids.intersection(manual_ids)
     ):
         _invalid()
+    # Unregistered facts remain application-owned, including required sources supplied manually.
+    read_sources = [
+        (source_id, contract)
+        for source_id, contract in sources
+        if source_id in managed_ids or source_id not in manual_ids
+    ]
+    read_ids = {source_id for source_id, _ in read_sources}
     identity = cast(JSONObject, body["attribution"])
     context = DataResourceContext(
         principal_id=str(identity["principalId"]),
@@ -373,7 +389,7 @@ async def resolve_data(
         except Exception:
             return unavailable_fact(source_id, c)
 
-    tasks = [asyncio.create_task(bounded_read(source_id, c)) for source_id, c in sources]
+    tasks = [asyncio.create_task(bounded_read(source_id, c)) for source_id, c in read_sources]
     try:
         # A failed source must not discard completed facts or leave queued reads
         # running after the batch deadline. Preserve source order in signed input.
@@ -382,7 +398,7 @@ async def resolve_data(
             task.result()
             if task in done and not task.cancelled()
             else unavailable_fact(source_id, c)
-            for task, (source_id, c) in zip(tasks, sources, strict=True)
+            for task, (source_id, c) in zip(tasks, read_sources, strict=True)
         ]
     finally:
         for task in tasks:
@@ -392,9 +408,10 @@ async def resolve_data(
     from ._protocol import canonical
 
     body["factResolutions"] = cast(
-        list[JSONValue], [fact for fact in manual if fact.get("sourceVersionId") not in ids] + facts
+        list[JSONValue],
+        [fact for fact in manual if fact.get("sourceVersionId") not in read_ids] + facts,
     )
     fresh = PreparedCall(
         call.request_id, call.action_key, call.traceparent, canonical(body).encode()
     )
-    return fresh, cast(str, plan["bundleId"]), cast(int, plan["sequence"])
+    return fresh, cast(str, plan["bundleId"]), cast(int, plan["sequence"]), bool(managed_ids)

@@ -29,7 +29,16 @@ from ._protocol import (
 )
 from .guard import GuardHandler, GuardProcessing, process_guard, registered_handlers
 from .observe import _REF, _UUID, AsyncObserveClient, _matches
-from .types import AuthRailError, Decision, JSONObject, Operation, Phase, PreparedCall
+from .types import (
+    AuthRailError,
+    Decision,
+    JSONObject,
+    Operation,
+    Phase,
+    PreparedCall,
+    TrajectoryMigration,
+    TrajectorySession,
+)
 
 ExecutionEvent = Literal[
     "started", "succeeded", "failed", "unknown", "reconciled_succeeded", "reconciled_failed"
@@ -294,6 +303,17 @@ class AsyncEnforceClient:
         self._pending: weakref.WeakKeyDictionary[
             EnforceBlockedError, tuple[ApprovalContinuation, Executor]
         ] = weakref.WeakKeyDictionary()
+
+    async def admit_trajectory_session(
+        self, principal_id: str, session_id: str
+    ) -> TrajectorySession:
+        return await self._sidecar.admit_trajectory_session(principal_id, session_id)
+
+    async def retire_trajectory_session(self, session: TrajectorySession) -> None:
+        await self._sidecar.retire_trajectory_session(session)
+
+    async def migrate_legacy_trajectory_sessions(self) -> TrajectoryMigration:
+        return await self._sidecar.migrate_legacy_trajectory_sessions()
 
     async def __aenter__(self) -> AsyncEnforceClient:
         return self

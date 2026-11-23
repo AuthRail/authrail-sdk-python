@@ -60,8 +60,12 @@ application callbacks must still cooperate with cancellation and avoid effects.
 
 Provider and application fact readers perform bounded reads. They verify the
 reviewed account/resource identity and report unavailable or untrusted values
-without inventing zero balances or passing booleans. The sidecar applies the
-reviewed source's freshness requirements. A lookup result alone is not permission.
+without inventing zero balances or passing booleans. Combined Data and contextual
+checks refresh registered, required facts once after contextual preparation. Changed
+canonical input receives new contextual bindings before evaluation; manual facts
+remain application-owned. The exact final checked snapshot binds approvals and
+execution receipts. Bundle changes stop reads before resource or credential lookup.
+The sidecar applies the reviewed freshness rules. A lookup result alone is not permission.
 
 Contextual extraction sends only application-selected bytes to the configured
 model provider using the customer's credential. It does not redact automatically.
@@ -104,3 +108,21 @@ retains a new exact review. Older votes and expired permits do not grant that
 new request. Standard claim/recovery remains bound to the original checked input.
 The matching sidecar source contract is required; released version compatibility
 is documented separately in the README.
+
+## Managed session ownership
+
+Session admission, retirement and explicit legacy migration use the existing
+adapter-authenticated local listener. The sidecar owns monotonic generations,
+active hook sequences and atomic private-journal checkpoints. The SDK includes
+generation and sequence in the canonical input digest and reuses the frozen
+snapshot for the result. Completed reads compact into verified ordered history
+and the latest completed result replay fingerprint; older compacted sequences
+cannot become fresh calls. Applications coordinate concurrent preparation using
+the sidecar's durable next sequence.
+
+Retirement frees one exact active generation without acknowledging reports,
+resolving an uncertain effect or retrying a business callback. Explicit legacy
+migration disables the unversioned protocol before freeing its histories; it is
+never an automatic admission side effect. The journal belongs to one sidecar
+instance. Existing central Action/attempt and evidence owners retain recovery;
+these methods do not supply shared storage between replicas.

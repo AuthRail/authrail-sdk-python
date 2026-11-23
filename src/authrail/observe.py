@@ -42,6 +42,8 @@ from .types import (
     Operation,
     Phase,
     PreparedCall,
+    TrajectoryMigration,
+    TrajectorySession,
 )
 
 T = TypeVar("T")
@@ -111,6 +113,69 @@ class AsyncObserveClient:
             transport=transport, trust_env=False, follow_redirects=False, timeout=2.0
         )
         self._pending: set[asyncio.Task[Observation]] = set()
+
+    async def admit_trajectory_session(
+        self, principal_id: str, session_id: str
+    ) -> TrajectorySession:
+        """Admit or inspect the current generation without replaying a business action."""
+        if not _matches(_REF, principal_id) or not _matches(_REF, session_id):
+            raise AuthRailError("Invalid trajectory identity")
+        value = await self._request_json(
+            "/trajectory/sessions",
+            {"principalId": principal_id, "sessionId": session_id},
+            status=200,
+            deadline_seconds=2,
+        )
+        generation, sequence = value.get("generation"), value.get("nextSequence")
+        if (
+            value.get("principalId") != principal_id
+            or value.get("sessionId") != session_id
+            or any(
+                type(counter) is not int or not 0 < counter <= 9007199254740991
+                for counter in (generation, sequence)
+            )
+        ):
+            raise AuthRailError("Invalid trajectory admission response")
+        return TrajectorySession(
+            principal_id, session_id, cast(int, generation), cast(int, sequence)
+        )
+
+    async def retire_trajectory_session(self, session: TrajectorySession) -> None:
+        """Retire only this generation; pending reports and unknown effects stay retained."""
+        if (
+            not _matches(_REF, session.principal_id)
+            or not _matches(_REF, session.session_id)
+            or type(session.generation) is not int
+            or not 0 < session.generation <= 9007199254740991
+        ):
+            raise AuthRailError("Invalid trajectory retirement")
+        await self._request_json(
+            "/trajectory/sessions/retire",
+            {
+                "principalId": session.principal_id,
+                "sessionId": session.session_id,
+                "generation": session.generation,
+            },
+            status=204,
+            deadline_seconds=2,
+        )
+
+    async def migrate_legacy_trajectory_sessions(self) -> TrajectoryMigration:
+        """Explicitly disable legacy admissions and retire only their local histories."""
+        value = await self._request_json(
+            "/trajectory/sessions/migrate-legacy",
+            {"disableLegacy": True},
+            status=200,
+            deadline_seconds=2,
+        )
+        count = value.get("retiredLegacySessions")
+        if (
+            value.get("legacyDisabled") is not True
+            or type(count) is not int
+            or not 0 <= count <= 128
+        ):
+            raise AuthRailError("Invalid trajectory migration response")
+        return TrajectoryMigration(True, count)
 
     async def __aenter__(self) -> AsyncObserveClient:
         return self
@@ -247,7 +312,7 @@ class AsyncObserveClient:
         if phase not in ("tool_call", "tool_result"):
             raise AuthRailError("Invalid evaluation phase")
         original_call = call
-        call, data_bundle, data_sequence = await resolve_data(
+        call, data_bundle, data_sequence, has_managed_requirements = await resolve_data(
             self._http,
             self._endpoint,
             self._token,
@@ -255,6 +320,7 @@ class AsyncObserveClient:
             call,
             phase,
             refresh_retained_facts,
+            expected_bundle,
         )
         if (
             expected_bundle
@@ -267,10 +333,7 @@ class AsyncObserveClient:
             raise ConfigurationChangedError()
         if expected_bundle is None and data_bundle:
             expected_bundle = {"bundleId": data_bundle, "sequence": data_sequence}
-        body = call.as_dict()
-        if expected_bundle:
-            body["expectedBundle"] = expected_bundle
-        if body.get("reviewSummary") is not None and expected_mode != "enforce":
+        if call.as_dict().get("reviewSummary") is not None and expected_mode != "enforce":
             raise AuthRailError("Review summary requires Enforce")
         findings = await read_contextual(
             self._http,
@@ -284,6 +347,36 @@ class AsyncObserveClient:
             result=result,
             expected_bundle=expected_bundle,
         )
+        if has_managed_requirements and findings:
+            # Interpretation can outlast a one-second source freshness window. Refresh once,
+            # then bind findings again if any signed input changed; never reuse old bindings.
+            previous_input = encode_input(call.as_dict(), phase, result)
+            call, data_bundle, data_sequence, _ = await resolve_data(
+                self._http,
+                self._endpoint,
+                self._token,
+                self._data_sources,
+                call,
+                phase,
+                True,
+                expected_bundle,
+            )
+            if encode_input(call.as_dict(), phase, result) != previous_input:
+                findings = await read_contextual(
+                    self._http,
+                    endpoint=self._endpoint,
+                    token=self._token,
+                    organisation_id=self._organisation_id,
+                    deployment_id=self._deployment_id,
+                    private_key=self._private,
+                    call=call,
+                    phase=phase,
+                    result=result,
+                    expected_bundle=expected_bundle,
+                )
+        body = call.as_dict()
+        if expected_bundle:
+            body["expectedBundle"] = expected_bundle
         if findings:
             body["contextualFindings"] = findings
         body["formatVersion"] = 1
@@ -404,6 +497,8 @@ class AsyncObserveClient:
                         raise ConfigurationChangedError()
                 if response.status_code != status:
                     raise AuthRailError(f"Sidecar returned HTTP {response.status_code}")
+                if status == 204:
+                    return {}
                 data = bytearray()
                 async for chunk in response.aiter_bytes():
                     if len(data) + len(chunk) > MAX_CONTEXT:

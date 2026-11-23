@@ -120,7 +120,6 @@ class ProtocolTests(unittest.TestCase):
 
     def test_only_literal_loopback_and_private_ed25519_keys_are_accepted(self):
         for url in [
-            "https://127.0.0.1",
             "http://localhost:7078",
             "http://example.com",
             "http://127.0.0.1/other",
@@ -129,6 +128,8 @@ class ProtocolTests(unittest.TestCase):
         ]:
             with self.subTest(url=url), self.assertRaises(AuthRailError):
                 client(sidecar_url=url)
+        secure = client(sidecar_url="https://127.0.0.1")
+        asyncio.run(secure.aclose())
         with self.assertRaises(AuthRailError):
             client(executor_private_key=b"not-a-key")
 
@@ -281,3 +282,52 @@ class ObserveTests(unittest.IsolatedAsyncioTestCase):
             observed = await run.observation
             self.assertIsNone(observed.result_decision)
             self.assertIsNotNone(observed.result_error)
+
+
+class TrajectoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_generation_requests_and_explicit_legacy_migration(self):
+        paths = []
+
+        def respond(request):
+            paths.append(request.url.path)
+            body = json.loads(request.content)
+            self.assertEqual(request.headers["Authorization"], "Bearer " + "c" * 32)
+            if request.url.path == "/trajectory/sessions":
+                self.assertEqual(body, {"principalId": "staff_123", "sessionId": "task_123"})
+                return httpx.Response(200, json={**body, "generation": 7, "nextSequence": 3})
+            if request.url.path == "/trajectory/sessions/retire":
+                self.assertEqual(
+                    body, {"principalId": "staff_123", "sessionId": "task_123", "generation": 7}
+                )
+                return httpx.Response(204)
+            self.assertEqual(request.url.path, "/trajectory/sessions/migrate-legacy")
+            self.assertEqual(body, {"disableLegacy": True})
+            return httpx.Response(200, json={"legacyDisabled": True, "retiredLegacySessions": 2})
+
+        async with client(httpx.MockTransport(respond)) as sidecar:
+            session = await sidecar.admit_trajectory_session("staff_123", "task_123")
+            await sidecar.retire_trajectory_session(session)
+            self.assertEqual(paths, ["/trajectory/sessions", "/trajectory/sessions/retire"])
+            migration = await sidecar.migrate_legacy_trajectory_sessions()
+            self.assertTrue(migration.legacy_disabled)
+            self.assertEqual(migration.retired_legacy_sessions, 2)
+            call = sidecar.prepare(
+                operation(
+                    trajectory={
+                        "sessionId": session.session_id,
+                        "generation": session.generation,
+                        "sequence": session.next_sequence,
+                        "complete": True,
+                        "priorReadOperationVersionIds": [],
+                    }
+                ),
+                {"amount": 50},
+            )
+            self.assertEqual(
+                encode_input(call.as_dict(), "tool_call"),
+                '{"arguments":{"amount":50},"trajectory":{"sessionId":"task_123","generation":7,"sequence":3,"complete":true,"priorReadOperationVersionIds":[]}}',
+            )
+            changed = call.as_dict()
+            changed["trajectory"]["sequence"] = 0
+            with self.assertRaises(AuthRailError):
+                encode_input(changed, "tool_call")

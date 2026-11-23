@@ -185,13 +185,28 @@ def encode_input(call: JSONObject, phase: Phase, result: object = None) -> str:
         entries.append('"factResolutions":[' + ",".join(encoded) + "]")
     trajectory = call.get("trajectory")
     if trajectory:
+        if type(trajectory) is dict:
+            generation, sequence = trajectory.get("generation"), trajectory.get("sequence")
+            if (generation is None) != (sequence is None) or any(
+                value is not None and (type(value) is not int or not 0 < value <= 9007199254740991)
+                for value in (generation, sequence)
+            ):
+                raise AuthRailError("Invalid trajectory generation or sequence")
         if type(trajectory) is dict and trajectory.get("start") is False:
             trajectory = {key: value for key, value in trajectory.items() if key != "start"}
         entries.append(
             '"trajectory":'
             + _fields(
                 trajectory,
-                ("sessionId", "start", "complete", "priorReadOperationVersionIds", "values"),
+                (
+                    "sessionId",
+                    "generation",
+                    "sequence",
+                    "start",
+                    "complete",
+                    "priorReadOperationVersionIds",
+                    "values",
+                ),
                 ("sessionId", "complete", "priorReadOperationVersionIds"),
             )
         )
